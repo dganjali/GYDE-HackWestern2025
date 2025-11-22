@@ -36,6 +36,15 @@ BAUD = 115200
 IMG_WIDTH = 240
 CAM_FOV_DEG = 60.0
 
+# Tunable constants (defined in-script, not via CLI)
+KP = 0.9
+TURN_SCALE = 2.0
+MAX_SPEED = 180
+DEADZONE = 3.0
+AUTOCALIBRATE = False
+INVERT_LEFT = False
+INVERT_RIGHT = False
+
 
 def clamp(v, lo=-255, hi=255):
     try:
@@ -144,13 +153,6 @@ def main():
     p.add_argument('--openmv', default=DEFAULT_OPENMV)
     p.add_argument('--arduino', default=DEFAULT_ARDUINO)
     p.add_argument('--baud', default=BAUD, type=int)
-    p.add_argument('--kp', type=float, default=0.6)
-    p.add_argument('--turn-scale', type=float, default=2.0)
-    p.add_argument('--max-speed', type=int, default=180)
-    p.add_argument('--deadzone', type=float, default=3.0)
-    p.add_argument('--autocalibrate', action='store_true')
-    p.add_argument('--invert-left', action='store_true')
-    p.add_argument('--invert-right', action='store_true')
     args = p.parse_args()
 
     try:
@@ -171,7 +173,7 @@ def main():
     t.start()
 
     active_sign = 1
-    if args.autocalibrate:
+    if AUTOCALIBRATE:
         print('Autocalibrating motor sign...')
         score_a = measure_rotation_response(state, arduino_ser, 120, -120)
         score_b = measure_rotation_response(state, arduino_ser, -120, 120)
@@ -181,12 +183,12 @@ def main():
             print('Using inverted pattern')
 
     print('Starting simple proportional turn controller')
-    kp = args.kp
-    turn_scale = args.turn_scale
-    max_speed = args.max_speed
-    deadzone = args.deadzone
-    invert_left = args.invert_left
-    invert_right = args.invert_right
+    kp = KP
+    turn_scale = TURN_SCALE
+    max_speed = MAX_SPEED
+    deadzone = DEADZONE
+    invert_left = INVERT_LEFT
+    invert_right = INVERT_RIGHT
 
     try:
         prev_l = 0
