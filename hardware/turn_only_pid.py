@@ -117,7 +117,14 @@ def main():
     p.add_argument('--openmv', default=DEFAULT_OPENMV)
     p.add_argument('--arduino', default=DEFAULT_ARDUINO)
     p.add_argument('--baud', default=BAUD, type=int)
+    p.add_argument('--invert-left', action='store_true', help='Invert left motor sign')
+    p.add_argument('--invert-right', action='store_true', help='Invert right motor sign')
+    p.add_argument('--deadzone', type=float, default=0.0, help='Degrees deadzone around center to ignore small errors')
     args = p.parse_args()
+
+    invert_left = args.invert_left
+    invert_right = args.invert_right
+    deadzone = args.deadzone
 
     try:
         openmv_ser = serial.Serial(args.openmv, args.baud, timeout=1)
@@ -149,7 +156,11 @@ def main():
                 left = 0
                 right = 0
             else:
-                err = -angle
+                # apply deadzone to avoid twitching
+                if abs(angle) <= deadzone:
+                    err = 0.0
+                else:
+                    err = -angle
                 integral += err * DT
                 derivative = (err - prev_err) / DT
                 turn_output = KP * err + KI * integral + KD * derivative
@@ -159,6 +170,12 @@ def main():
                 # in-place rotation (left/right signs chosen so motors spin opposite directions)
                 left = diff
                 right = -diff
+
+                # allow per-motor inversion if wiring requires it
+                if invert_left:
+                    left = -left
+                if invert_right:
+                    right = -right
 
             send_cmd(arduino_ser, left, right)
             print(f"CAM_X={cam_x} ANGLE={angle} L={left} R={right}")
