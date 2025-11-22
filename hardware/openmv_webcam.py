@@ -8,8 +8,8 @@ sensor.set_pixformat(sensor.RGB565)
 sensor.set_framesize(sensor.QQVGA)  # 320x240 base resolution
 sensor.skip_frames(time=2000)
 
-# UART3 on OpenMV, 115200 baud (matches rpi_controller.py)
-uart = pyb.UART(3, 115200, timeout_char=1000)
+# Use USB Virtual COM Port so frames go over USB (Pi sees /dev/ttyACM*)
+usb = pyb.USB_VCP()
 
 # Simple 4-byte magic header to mark the start of each frame
 FRAME_MAGIC = b"FRAM"
@@ -29,9 +29,13 @@ while True:
 
     # Send frame as: MAGIC (4 bytes) + length (4 bytes, big-endian) + JPEG data
     try:
-        uart.write(FRAME_MAGIC)
-        uart.write(struct.pack(">I", length))
-        uart.write(data)
+        if usb.isconnected():
+            usb.write(FRAME_MAGIC)
+            usb.write(struct.pack(">I", length))
+            usb.write(data)
+        else:
+            # USB not connected to host; skip sending this frame
+            pass
     except Exception:
-        # Ignore transient UART errors to keep loop running
+        # Ignore transient USB errors to keep loop running
         pass
