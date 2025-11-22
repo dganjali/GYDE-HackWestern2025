@@ -33,9 +33,9 @@ BAUD = 115200
 IMG_WIDTH = 240
 CAM_FOV_DEG = 60.0
 # Default PID gains (tweak below or via CLI)
-KP = 2.2
+KP = 3.0
 KI = 0.0
-KD = 1.2
+KD = 2.5
 # control loop interval (s)
 DT = 0.03  # ~33 Hz for faster response
 # scale to convert PID output (degrees) -> motor speed
@@ -47,7 +47,10 @@ INTEGRAL_LIMIT = 100.0
 # slew rate default (units per second)
 SLEW_RATE = 800.0
 # derivative filter time constant (s). Small values = less filtering.
-D_FILTER_TAU = 0.02
+D_FILTER_TAU = 0.04
+# Adaptive scaling configuration: make aggressive scaling less extreme to avoid overshoot
+ADAPTIVE_DENOM = 30.0
+ADAPTIVE_MAX_EXTRA = 1.0  # max additional multiplier over 1.0 (so max scale = 1 + ADAPTIVE_MAX_EXTRA)
 
 
 def clamp(v, lo=-255, hi=255):
@@ -134,6 +137,7 @@ def main():
     p.add_argument('--kp', type=float, default=KP, help='Proportional gain')
     p.add_argument('--ki', type=float, default=KI, help='Integral gain')
     p.add_argument('--kd', type=float, default=KD, help='Derivative gain')
+    p.add_argument('--simple-proportional', action='store_true', help='Use a simple P-only controller (no I/D) similar to a servo')
     p.add_argument('--turn-scale', type=float, default=TURN_SCALE, help='Scale from PID output to motor differential')
     p.add_argument('--dt', type=float, default=DT, help='Control loop interval in seconds')
     p.add_argument('--max-speed', type=int, default=MAX_SPEED, help='Max motor speed magnitude')
@@ -150,6 +154,7 @@ def main():
     kp = args.kp
     ki = args.ki
     kd = args.kd
+    simple_prop = args.simple_proportional
     turn_scale = args.turn_scale
     dt = args.dt
     max_speed = args.max_speed
@@ -248,27 +253,34 @@ def main():
                     err = 0.0
                 else:
                     err = -angle
-                integral += err * dt
-                # anti-windup clamp
-                if integral > int_limit:
-                    integral = int_limit
-                elif integral < -int_limit:
-                    integral = -int_limit
+                    if simple_prop:
+                        # simple proportional control (servo-like): direct mapping
+                        turn_output = kp * err
+                        eff_turn_scale = turn_scale
+                        diff = int(max(-max_speed, min(max_speed, turn_output * eff_turn_scale)))
+                    else:
+                        integral += err * dt
+                        # anti-windup clamp
+                        if integral > int_limit:
+                            integral = int_limit
+                        elif integral < -int_limit:
+                            integral = -int_limit
 
-                # derivative (filtered) to reduce noise-driven D spikes
-                derivative_raw = (err - prev_err) / dt
-                alpha = dt / (d_filter_tau + dt) if d_filter_tau > 0.0 else 1.0
-                derivative = alpha * derivative_raw + (1.0 - alpha) * prev_derivative
-                prev_derivative = derivative
-                prev_err = err
+                        # derivative (filtered) to reduce noise-driven D spikes
+                        derivative_raw = (err - prev_err) / dt
+                        alpha = dt / (d_filter_tau + dt) if d_filter_tau > 0.0 else 1.0
+                        derivative = alpha * derivative_raw + (1.0 - alpha) * prev_derivative
+                        prev_derivative = derivative
+                        prev_err = err
 
-                turn_output = kp * err + ki * integral + kd * derivative
+                        turn_output = kp * err + ki * integral + kd * derivative
 
-                # adaptive turn scaling: be more aggressive for large angle errors
-                adaptive_scale = 1.0 + min(abs(err) / 20.0, 2.0)
-                eff_turn_scale = turn_scale * adaptive_scale
+                        # adaptive turn scaling: be more conservative to avoid overshoot
+                        adaptive_extra = min(abs(err) / ADAPTIVE_DENOM, ADAPTIVE_MAX_EXTRA)
+                        adaptive_scale = 1.0 + adaptive_extra
+                        eff_turn_scale = turn_scale * adaptive_scale
 
-                diff = int(max(-max_speed, min(max_speed, turn_output * eff_turn_scale)))
+                        diff = int(max(-max_speed, min(max_speed, turn_output * eff_turn_scale)))
                 # in-place rotation using active_sign
                 left = active_sign * diff
                 right = -active_sign * diff
