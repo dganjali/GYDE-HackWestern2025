@@ -32,12 +32,16 @@ BAUD = 115200
 # Camera and PID config
 IMG_WIDTH = 240
 CAM_FOV_DEG = 60.0
-KP = 1.5
+# Default PID gains (tweak below or via CLI)
+KP = 1.3
 KI = 0.0
-KD = 0.02
-DT = 0.1
-TURN_SCALE = 3.0
-MAX_SPEED = 200
+KD = 0.12
+# control loop interval (s)
+DT = 0.05  # 20 Hz for faster response
+# scale to convert PID output (degrees) -> motor speed
+TURN_SCALE = 4.0
+# clamp for motor command magnitude
+MAX_SPEED = 220
 
 
 def clamp(v, lo=-255, hi=255):
@@ -121,12 +125,25 @@ def main():
     p.add_argument('--invert-right', action='store_true', help='Invert right motor sign')
     p.add_argument('--deadzone', type=float, default=0.0, help='Degrees deadzone around center to ignore small errors')
     p.add_argument('--autocalibrate', action='store_true', help='Auto-detect sign pattern using camera feedback')
+    p.add_argument('--kp', type=float, default=KP, help='Proportional gain')
+    p.add_argument('--ki', type=float, default=KI, help='Integral gain')
+    p.add_argument('--kd', type=float, default=KD, help='Derivative gain')
+    p.add_argument('--turn-scale', type=float, default=TURN_SCALE, help='Scale from PID output to motor differential')
+    p.add_argument('--dt', type=float, default=DT, help='Control loop interval in seconds')
+    p.add_argument('--max-speed', type=int, default=MAX_SPEED, help='Max motor speed magnitude')
     args = p.parse_args()
 
     invert_left = args.invert_left
     invert_right = args.invert_right
     deadzone = args.deadzone
     autocal = args.autocalibrate
+    # PID gains (can override via CLI)
+    kp = args.kp
+    ki = args.ki
+    kd = args.kd
+    turn_scale = args.turn_scale
+    dt = args.dt
+    max_speed = args.max_speed
 
     try:
         openmv_ser = serial.Serial(args.openmv, args.baud, timeout=1)
@@ -213,12 +230,12 @@ def main():
                     err = 0.0
                 else:
                     err = -angle
-                integral += err * DT
-                derivative = (err - prev_err) / DT
-                turn_output = KP * err + KI * integral + KD * derivative
+                integral += err * dt
+                derivative = (err - prev_err) / dt
+                turn_output = kp * err + ki * integral + kd * derivative
                 prev_err = err
 
-                diff = int(max(-MAX_SPEED, min(MAX_SPEED, turn_output * TURN_SCALE)))
+                diff = int(max(-max_speed, min(max_speed, turn_output * turn_scale)))
                 # in-place rotation using active_sign
                 left = active_sign * diff
                 right = -active_sign * diff

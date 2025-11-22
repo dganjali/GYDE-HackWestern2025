@@ -6,8 +6,8 @@
 
 // Motor A pins
 const int PWMA = 5;
-const int AIN1 = 7;
-const int AIN2 = 6;
+const int AIN1 = 6;
+const int AIN2 = 7;
 
 // Motor B pins
 // Motor B pins
@@ -15,8 +15,8 @@ const int AIN2 = 6;
 // A5 on many Arduino boards is not a PWM pin; using a PWM pin (e.g., D10) prevents
 // incorrect motor behaviour. Update wiring if you change this.
 const int PWMB = 10;  // PWM-capable digital pin (was A5)
-const int BIN1 = A3;
-const int BIN2 = A4;
+const int BIN1 = A4;
+const int BIN2 = A3;
 
 // Ultrasonic pins
 const int TRIG_PIN = 8;
@@ -126,8 +126,11 @@ void setMotor(int pwmpin, int in1, int in2, int value) {
 }
 
 void setTank(int left, int right) {
+  // NOTE: invert right motor command if wiring/polarity makes positive values
+  // cause the motor to spin the opposite physical direction. This ensures
+  // the convention (left positive, right negative) produces in-place rotation.
   setMotor(PWMA, AIN1, AIN2, left);
-  setMotor(PWMB, BIN1, BIN2, right);
+  setMotor(PWMB, BIN1, BIN2, -right);
 }
 
 void stopMotors() {
