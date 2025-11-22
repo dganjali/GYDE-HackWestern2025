@@ -41,7 +41,7 @@ SLEW_RATE_LIMIT = 800.0  # Max change in motor speed per second to smooth motion
 # Distance Control
 TARGET_DIST_M = 0.5
 DIST_DEADBAND_M = 0.2  # +/- 20cm, so robot stops between 0.3m and 0.7m
-KP_DIST = 250.0        # Proportional gain for distance control
+KP_DIST = -200.0        # Proportional gain for distance control
 BASE_SPEED = 0         # Base speed, we'll use P-control for fwd/bwd
 
 # Shared state for sensor data (thread-safe)
