@@ -19,6 +19,8 @@ import re
 import serial
 import time
 import sys
+import threading
+from collections import deque
 
 # --- Config ---
 DEFAULT_OPENMV_PORT = '/dev/ttyACM0'
@@ -30,17 +32,26 @@ IMAGE_WIDTH = 240  # pixels (used to normalize dx)
 MAX_LINEAR = 0.25   # m/s, conservative default
 MAX_ANGULAR = 1.0   # rad/s
 
-# Controller gains
-KP_ANG = 1.0
+# Controller gains (PID for angular)
+PID_KP = 1.6
+PID_KI = 0.01
+PID_KD = 0.15
 KP_LIN = 0.6
 
-# Desired distance: if we can estimate distance (via bounding box) use it, else
-# the controller will drive a small forward speed when target is roughly centered.
-DESIRED_DISTANCE = 1.0  # meters (used only if the Pi receives a distance estimate)
+# Desired distance (target following distance)
+DESIRED_DISTANCE = 0.5  # meters (50 cm target)
 
 CAM_TIMEOUT = 0.25  # seconds without camera input -> send zero vel
 # Telemetry thresholds
 FRONT_OBSTACLE_CM = 25  # stop if object closer than this
+
+# Control rates
+TURN_RATE_HZ = 30.0
+MOVE_RATE_HZ = 20.0
+SENDER_RATE_HZ = 20.0
+
+# Centering threshold in pixels
+CENTER_THRESHOLD_PX = 10
 
 
 def parse_dx_and_height(line: str):
@@ -49,11 +60,11 @@ def parse_dx_and_height(line: str):
     several patterns commonly found in the repo's OpenMV output.
     """
     # dx patterns: "dx=123", "dx:123", "dx 123", or "dx\t123"
-    m = re.search(r'dx[:=]?\s*(-?\d+)', line)
+    m = re.search(r'dx[:=]?\s*(-?\d+)', line, flags=re.I)
     dx = int(m.group(1)) if m else None
 
     # bounding box height (h or height) or y/h pairs, try common signatures
-    m2 = re.search(r'h[:=]?\s*(\d+)', line)
+    m2 = re.search(r'h[:=]?\s*(\d+)', line, flags=re.I)
     h = int(m2.group(1)) if m2 else None
 
     # Some prints include "y <num>\t..." and "x <num>\t y <num>\t"
@@ -68,7 +79,8 @@ def estimate_distance_from_height(h: int):
     """
     if h is None or h <= 0:
         return None
-    K = 50.0
+    # simple calibrated constant (needs tuning per camera)
+    K = 60.0
     return K / float(h)
 
 
@@ -80,8 +92,8 @@ def compute_cmds(dx, distance):
         norm_dx = float(dx) / (IMAGE_WIDTH / 2.0)
         norm_dx = max(-1.0, min(1.0, norm_dx))
 
-    # Angular: drive proportional to normalized dx
-    ang = -KP_ANG * norm_dx * MAX_ANGULAR
+    # Angular: drive proportional to normalized dx (simple fallback if PID not used)
+    ang = -PID_KP * norm_dx * MAX_ANGULAR
 
     # Linear: encourage forward motion when target is centered. If distance is
     # known, use it to approach DESIRED_DISTANCE, otherwise reduce when target
@@ -124,66 +136,198 @@ def main():
             print('Running in dry-run mode (no Arduino writes).')
             ard = None
 
-    last_cam_time = time.time()
-    last_front_dist = None
-    last_side_dist = None
+    # Shared state between threads
+    state = {
+        'dx': None,
+        'h': None,
+        'cam_ts': 0.0,
+        'front_cm': None,
+        'side_cm': None,
+        'desired_lin': 0.0,
+        'desired_ang': 0.0,
+    }
+    state_lock = threading.Lock()
+    stop_event = threading.Event()
 
-    while True:
-        try:
-            line = cam.readline().decode(errors='ignore').strip()
-            now = time.time()
-
-            if line:
-                # parse dx and optional bbox height
+    def cam_reader():
+        # Continuously read camera lines and update state
+        while not stop_event.is_set():
+            try:
+                line = cam.readline().decode(errors='ignore').strip()
+                if not line:
+                    time.sleep(0.005)
+                    continue
                 dx, h = parse_dx_and_height(line)
-                dist = estimate_distance_from_height(h) if h is not None else None
-                lin, ang = compute_cmds(dx, dist)
-                # Safety override using last known Arduino telemetry (front ultrasonic)
-                if last_front_dist is not None and last_front_dist < FRONT_OBSTACLE_CM:
-                    lin = 0.0
-                    print(f"Obstacle ahead ({last_front_dist:.1f}cm) - overriding linear speed to 0")
-                msg = f"L:{lin:.3f};A:{ang:.3f}\n"
-                if ard:
-                    ard.write(msg.encode())
-                print(f'CAM -> "{line}"  =>  {msg.strip()}')
-                last_cam_time = now
+                with state_lock:
+                    state['dx'] = dx
+                    state['h'] = h
+                    state['cam_ts'] = time.time()
+                # optional debug
+                # print('CAM:', line)
+            except Exception:
+                time.sleep(0.01)
+
+    def ard_reader():
+        # Read Arduino telemetry and update distances
+        while not stop_event.is_set():
+            try:
+                if ard and ard.in_waiting:
+                    tline = ard.readline().decode(errors='ignore').strip()
+                    if tline:
+                        m_f = re.search(r'USF[:=]?\s*(-?\d+\.?\d*)', tline)
+                        m_s = re.search(r'USS[:=]?\s*(-?\d+\.?\d*)', tline)
+                        with state_lock:
+                            if m_f:
+                                try:
+                                    state['front_cm'] = float(m_f.group(1))
+                                except:
+                                    state['front_cm'] = None
+                            if m_s:
+                                try:
+                                    state['side_cm'] = float(m_s.group(1))
+                                except:
+                                    state['side_cm'] = None
+                        print('ARDUINO:', tline)
+                else:
+                    time.sleep(0.01)
+            except Exception:
+                time.sleep(0.05)
+
+    # PID controller for angular (turning)
+    class PID:
+        def __init__(self, kp, ki, kd, out_min=-MAX_ANGULAR, out_max=MAX_ANGULAR):
+            self.kp = kp
+            self.ki = ki
+            self.kd = kd
+            self.out_min = out_min
+            self.out_max = out_max
+            self.int = 0.0
+            self.last = None
+
+        def update(self, err, dt):
+            if self.last is None:
+                deriv = 0.0
             else:
-                # no new camera data
-                if now - last_cam_time > CAM_TIMEOUT:
-                    # send stop
-                    msg = f"L:0.000;A:0.000\n"
-                    if ard:
+                deriv = (err - self.last) / max(dt, 1e-6)
+            self.int += err * dt
+            out = self.kp * err + self.ki * self.int + self.kd * deriv
+            out = max(self.out_min, min(self.out_max, out))
+            self.last = err
+            return out
+
+    pid = PID(PID_KP, PID_KI, PID_KD)
+
+    # Turning loop: computes desired_ang to center the target
+    def turning_loop():
+        last_t = time.time()
+        while not stop_event.is_set():
+            t0 = time.time()
+            dt = t0 - last_t if last_t else 1.0 / TURN_RATE_HZ
+            last_t = t0
+            with state_lock:
+                dx = state['dx']
+            if dx is None:
+                # no detection, zero angular
+                desired_ang = 0.0
+            else:
+                # convert pixel error to normalized [-1,1]
+                norm = float(dx) / (IMAGE_WIDTH / 2.0)
+                norm = max(-1.0, min(1.0, norm))
+                # PID expects error in normalized units (0 at center)
+                err = norm
+                desired_ang = -pid.update(err, dt)  # negative to turn toward target
+            with state_lock:
+                state['desired_ang'] = desired_ang
+            time.sleep(max(0.0, 1.0 / TURN_RATE_HZ - (time.time() - t0)))
+
+    # Movement loop: computes desired_lin to reach DESIRED_DISTANCE using fused distance
+    def movement_loop():
+        last_t = time.time()
+        while not stop_event.is_set():
+            t0 = time.time()
+            dt = t0 - last_t if last_t else 1.0 / MOVE_RATE_HZ
+            last_t = t0
+            with state_lock:
+                dx = state['dx']
+                h = state['h']
+                front = state['front_cm']
+            # estimate distance (m) from camera
+            cam_dist = estimate_distance_from_height(h) if h is not None and h > 0 else None
+            ard_dist = (front / 100.0) if front is not None and front > 0 else None
+            # fuse distances: prefer ultrasonic when available (weight 0.8), else camera
+            fused = None
+            if ard_dist is not None and ard_dist > 0:
+                if cam_dist is not None and cam_dist > 0:
+                    fused = 0.8 * ard_dist + 0.2 * cam_dist
+                else:
+                    fused = ard_dist
+            elif cam_dist is not None:
+                fused = cam_dist
+
+            # Movement policy: only move forward if target is centered (within threshold)
+            move = 0.0
+            centered = (dx is not None and abs(dx) <= CENTER_THRESHOLD_PX)
+            if fused is not None:
+                # fused distance available, move until within DESIRED_DISTANCE
+                if centered and fused > DESIRED_DISTANCE + 0.05:
+                    # P controller toward desired distance
+                    err = fused - DESIRED_DISTANCE
+                    move = KP_LIN * (err / max(DESIRED_DISTANCE, 0.001)) * MAX_LINEAR
+                    move = max(0.0, min(MAX_LINEAR, move))
+                else:
+                    move = 0.0
+            else:
+                # no distance measurement; cautiously move only if centered
+                if centered:
+                    move = 0.1 * MAX_LINEAR
+            # safety: if Arduino reports close obstacle, stop
+            with state_lock:
+                front_now = state['front_cm']
+            if front_now is not None and front_now > 0 and front_now < FRONT_OBSTACLE_CM:
+                move = 0.0
+            with state_lock:
+                state['desired_lin'] = move
+            time.sleep(max(0.0, 1.0 / MOVE_RATE_HZ - (time.time() - t0)))
+
+    # Sender loop: send combined commands at regular rate
+    serial_lock = threading.Lock()
+    def sender_loop():
+        while not stop_event.is_set():
+            t0 = time.time()
+            with state_lock:
+                lin = state['desired_lin']
+                ang = state['desired_ang']
+            # send over serial
+            msg = f"L:{lin:.3f};A:{ang:.3f}\n"
+            if ard:
+                try:
+                    with serial_lock:
                         ard.write(msg.encode())
-                    # only print occasionally
-                    print('No camera data - sending stop')
-                    last_cam_time = now
+                except Exception as e:
+                    print('Failed to write to Arduino:', e)
+            else:
+                print('SEND:', msg.strip())
+            time.sleep(max(0.0, 1.0 / SENDER_RATE_HZ - (time.time() - t0)))
 
-            # read telemetry from Arduino if any
-            if ard and ard.in_waiting:
-                tline = ard.readline().decode(errors='ignore').strip()
-                if tline:
-                    # parse ultrasonic telemetry lines like: USF:23.4;USS:45.2
-                    m_f = re.search(r'USF[:=]?\s*(-?\d+\.?\d*)', tline)
-                    m_s = re.search(r'USS[:=]?\s*(-?\d+\.?\d*)', tline)
-                    if m_f:
-                        try:
-                            last_front_dist = float(m_f.group(1))
-                        except:
-                            last_front_dist = None
-                    if m_s:
-                        try:
-                            last_side_dist = float(m_s.group(1))
-                        except:
-                            last_side_dist = None
-                    # print raw telemetry for debugging
-                    print('ARDUINO:', tline)
+    # Start threads
+    threads = []
+    t_cam = threading.Thread(target=cam_reader, daemon=True)
+    t_ard = threading.Thread(target=ard_reader, daemon=True)
+    t_turn = threading.Thread(target=turning_loop, daemon=True)
+    t_move = threading.Thread(target=movement_loop, daemon=True)
+    t_send = threading.Thread(target=sender_loop, daemon=True)
+    threads.extend([t_cam, t_ard, t_turn, t_move, t_send])
+    for t in threads:
+        t.start()
 
-        except KeyboardInterrupt:
-            print('Exiting')
-            break
-        except Exception as e:
-            print('Error in main loop:', e)
-            time.sleep(0.1)
+    try:
+        while True:
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        print('Stopping...')
+        stop_event.set()
+        for t in threads:
+            t.join(timeout=0.5)
 
 
 if __name__ == '__main__':
