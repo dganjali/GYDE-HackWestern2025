@@ -1,3 +1,20 @@
+            wakeRecognition.onresult = (event) => {
+                let transcript = '';
+                for (let i = event.resultIndex; i < event.results.length; i++) {
+                    transcript += event.results[i][0].transcript;
+                }
+                transcript = transcript.toLowerCase().trim();
+                if (transcript.includes('hello guide')) {
+                    updateVoiceStatus("Wake word detected, listening for command...", 'processing');
+                    try { wakeRecognition.stop(); } catch (e) {}
+                    wakeRecognition = null;
+                    startCommandCapture();
+                }
+            };
+            wakeRecognition.onstart = () => {
+                updateVoiceStatus("Listening for 'hello guide'...", 'listening');
+                voiceState = "wake_listen";
+            };
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -209,8 +226,12 @@
                 <div class="mic-icon">🎤</div>
                 <div>Tap to Speak</div>
             </button>
+            <button id="voice-toggle" style="margin-left:12px; padding:8px 16px; background:#ff9800; color:white; border:none; border-radius:6px; cursor:pointer; font-size:14px;">
+                Enable voice
+            </button>
         </div>
         
+        <div id="voice-status" class="status idle" style="font-size:13px; margin-bottom:10px;">Voice control off</div>
         <div style="text-align: center; margin-bottom: 15px;">
             <button id="testButton" style="padding: 8px 16px; background: #4caf50; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 14px;">
                 Test Server Connection
@@ -238,6 +259,161 @@
     </div>
 
     <script>
+            // --- Voice Control State Machine ---
+            let voiceState = "idle"; // "idle" | "wake_listen" | "command"
+            let wakeRecognition = null;
+            let commandRecognition = null;
+            let micInitialized = false;
+
+            const voiceToggleBtn = document.getElementById('voice-toggle');
+            const voiceStatusDiv = document.getElementById('voice-status');
+
+            function updateVoiceStatus(text, cls = 'idle') {
+                if (voiceStatusDiv) {
+                    voiceStatusDiv.textContent = text;
+                    voiceStatusDiv.className = `status ${cls}`;
+                }
+            }
+
+            function startWakeListening() {
+                if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+                    updateVoiceStatus('Voice control not supported in this browser.', 'error');
+                    return;
+                }
+                const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+                if (wakeRecognition) {
+                    wakeRecognition.onresult = null;
+                    wakeRecognition.onerror = null;
+                    wakeRecognition.onend = null;
+                    try { wakeRecognition.stop(); } catch (e) {}
+                    wakeRecognition = null;
+                }
+                wakeRecognition = new SpeechRecognition();
+                wakeRecognition.continuous = true;
+                wakeRecognition.interimResults = true;
+                wakeRecognition.lang = 'en-US';
+                wakeRecognition.maxAlternatives = 1;
+
+                wakeRecognition.onstart = () => {
+                    updateVoiceStatus("Listening for 'hello robot'...", 'listening');
+                    voiceState = "wake_listen";
+                };
+                wakeRecognition.onresult = (event) => {
+                    let transcript = '';
+                    for (let i = event.resultIndex; i < event.results.length; i++) {
+                        transcript += event.results[i][0].transcript;
+                    }
+                    transcript = transcript.toLowerCase().trim();
+                    if (transcript.includes('hello robot')) {
+                        updateVoiceStatus("Wake word detected, listening for command...", 'processing');
+                        try { wakeRecognition.stop(); } catch (e) {}
+                        wakeRecognition = null;
+                        startCommandCapture();
+                    }
+                };
+                wakeRecognition.onerror = (event) => {
+                    updateVoiceStatus('Voice error: ' + event.error, 'error');
+                    voiceState = "idle";
+                };
+                wakeRecognition.onend = () => {
+                    // If not transitioning to command, restart wake listening
+                    if (voiceState === "wake_listen") {
+                        startWakeListening();
+                    }
+                };
+                // Request mic permission only once
+                if (!micInitialized) {
+                    navigator.mediaDevices.getUserMedia({ audio: true })
+                        .then(stream => {
+                            micInitialized = true;
+                            stream.getTracks().forEach(track => track.stop());
+                            wakeRecognition.start();
+                        })
+                        .catch(err => {
+                            updateVoiceStatus('Mic access denied. Please allow and refresh.', 'error');
+                        });
+                } else {
+                    wakeRecognition.start();
+                }
+            }
+
+            function startCommandCapture() {
+                if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+                    updateVoiceStatus('Voice control not supported in this browser.', 'error');
+                    return;
+                }
+                const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+                if (commandRecognition) {
+                    commandRecognition.onresult = null;
+                    commandRecognition.onerror = null;
+                    commandRecognition.onend = null;
+                    try { commandRecognition.stop(); } catch (e) {}
+                    commandRecognition = null;
+                }
+                commandRecognition = new SpeechRecognition();
+                commandRecognition.continuous = false;
+                commandRecognition.interimResults = false;
+                commandRecognition.lang = 'en-US';
+                commandRecognition.maxAlternatives = 1;
+
+                voiceState = "command";
+                updateVoiceStatus("Listening for command...", 'processing');
+
+                let commandText = '';
+                commandRecognition.onresult = (event) => {
+                    for (let i = event.resultIndex; i < event.results.length; i++) {
+                        if (event.results[i].isFinal) {
+                            commandText += event.results[i][0].transcript;
+                        }
+                    }
+                    commandText = commandText.trim();
+                    if (commandText) {
+                        updateVoiceStatus("Command captured: " + commandText, 'success');
+                        sendCommandToServer(commandText);
+                    }
+                };
+                commandRecognition.onerror = (event) => {
+                    updateVoiceStatus('Command error: ' + event.error, 'error');
+                    setTimeout(() => startWakeListening(), 1200);
+                };
+                commandRecognition.onend = () => {
+                    // After command, return to wake listening
+                    setTimeout(() => startWakeListening(), 1200);
+                };
+                commandRecognition.start();
+            }
+
+            function stopAllListening() {
+                if (wakeRecognition) {
+                    try { wakeRecognition.stop(); } catch (e) {}
+                    wakeRecognition = null;
+                }
+                if (commandRecognition) {
+                    try { commandRecognition.stop(); } catch (e) {}
+                    commandRecognition = null;
+                }
+                voiceState = "idle";
+                updateVoiceStatus("Voice control off", 'idle');
+            }
+
+            // Refactor command sending logic for reuse
+            function sendCommandToServer(commandText) {
+                // Reuse the existing sendToServer logic
+                sendToServer(commandText);
+            }
+
+            // Wire up the voice toggle button
+            if (voiceToggleBtn) {
+                voiceToggleBtn.addEventListener('click', () => {
+                    if (voiceState === "idle") {
+                        startWakeListening();
+                        voiceToggleBtn.textContent = "Disable voice";
+                    } else {
+                        stopAllListening();
+                        voiceToggleBtn.textContent = "Enable voice";
+                    }
+                });
+            }
         // Suppress Chrome extension errors (they're harmless but annoying)
         window.addEventListener('error', (e) => {
             if (e.message && e.message.includes('message channel closed')) {
