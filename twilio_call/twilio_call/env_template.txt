@@ -1,0 +1,13 @@
+# Twilio Account Credentials
+# Get these from your Twilio Console: https://console.twilio.com/
+# Copy this file to .env and fill in your actual values
+
+TWILIO_ACCOUNT_SID=your_account_sid_here
+TWILIO_AUTH_TOKEN=your_auth_token_here
+TWILIO_PHONE_NUMBER=+1234567890
+
+# Testing/Trigger Configuration
+# Set TRIGGER_CALL=1 to execute the call when running call_alert.py
+TRIGGER_CALL=0
+TEST_NUMBER=+16475194566
+
