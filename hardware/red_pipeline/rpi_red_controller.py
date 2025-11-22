@@ -27,21 +27,29 @@ CAM_FOV_DEG = 60.0  # Approximate camera horizontal field of view
 # PID Controller Gains for turning
 KP = 0.5  # Proportional gain - Lowered to reduce aggressive reaction
 KI = 0.00 # Integral gain - Lowered to prevent overshoot
-KD = 7.0  # Derivative gain - Increased to dampen oscillations
+KD = 8.0  # Derivative gain - Increased to dampen oscillations
 
 # Control Loop Parameters
 LOOP_HZ = 20.0  # Target frequency for the control loop (20 Hz = 50ms per loop)
 DT = 1.0 / LOOP_HZ
 MAX_MOTOR_SPEED = 200  # Max PWM value for motors (0-255)
-TURN_SCALING = 2.5     # Scales PID output to motor speed difference - Lowered for less aggressive turns
+TURN_SCALING = 2.0     # Scales PID output to motor speed difference - Lowered for less aggressive turns
 ANGLE_DEADBAND_DEG = 2.5 # Ignore small angle errors to prevent jitter
 INTEGRAL_LIMIT = 150.0   # Prevents integral wind-up
 SLEW_RATE_LIMIT = 800.0  # Max change in motor speed per second to smooth motion
+
+# Distance Control
+TARGET_DIST_M = 0.5
+DIST_DEADBAND_M = 0.2  # +/- 20cm, so robot stops between 0.3m and 0.7m
+KP_DIST = 250.0        # Proportional gain for distance control
+BASE_SPEED = 0         # Base speed, we'll use P-control for fwd/bwd
 
 # Shared state for sensor data (thread-safe)
 state = {
     "cam_x": None,          # Center x-coordinate of the detected blob
     "last_cam_update": 0,   # Timestamp of the last valid camera message
+    "us_dist": None,        # Distance from the ultrasonic sensor in meters
+    "last_us_update": 0,    # Timestamp of the last ultrasonic update
 }
 state_lock = threading.Lock()
 
@@ -81,6 +89,38 @@ def openmv_reader_thread():
             time.sleep(5)
         except Exception as e:
             print(f"An unexpected error occurred in OpenMV reader: {e}")
+            time.sleep(1)
+
+def arduino_reader_thread(arduino_ser):
+    """
+    Continuously reads from the Arduino serial port in a background thread,
+    updating the shared state with the latest ultrasonic distance.
+    """
+    global state
+    print("Starting Arduino reader thread...")
+    while True:
+        try:
+            if arduino_ser.in_waiting > 0:
+                line = arduino_ser.readline().decode('utf-8', errors='ignore').strip()
+                if not line:
+                    continue
+
+                parts = line.split()
+                if not parts:
+                    continue
+
+                msg_type = parts[0]
+                with state_lock:
+                    if msg_type == "US" and len(parts) >= 2:
+                        # "US <dist_m>"
+                        try:
+                            state["us_dist"] = float(parts[1])
+                            state["last_us_update"] = time.time()
+                        except (ValueError, IndexError):
+                            pass # Ignore malformed distance values
+        except Exception as e:
+            print(f"An unexpected error occurred in Arduino reader: {e}")
+            # The main loop handles the serial object lifecycle, so we just wait
             time.sleep(1)
 
 # ---------- HELPER FUNCTIONS ----------
@@ -126,6 +166,15 @@ def main():
         print(f"Fatal: Could not open Arduino port {ARDUINO_PORT}: {e}")
         sys.exit(1)
 
+    # Start the Arduino reader thread
+    arduino_reader = threading.Thread(target=arduino_reader_thread, args=(arduino,), daemon=True)
+    arduino_reader.start()
+
+
+    # Start the Arduino reader thread
+    arduino_reader = threading.Thread(target=arduino_reader_thread, args=(arduino,), daemon=True)
+    arduino_reader.start()
+
     # PID state variables
     integral = 0.0
     prev_error = 0.0
@@ -140,13 +189,27 @@ def main():
             with state_lock:
                 cam_x = state["cam_x"]
                 last_update = state["last_cam_update"]
+                us_dist = state["us_dist"]
 
-            # Safety check: if no camera data for > 0.5s, stop.
+            # Safety check: if no camera data for > 0.5s, stop turning.
             if time.time() - last_update > 0.5:
                 cam_x = None
+            
+            # --- Distance Controller (P-controller) ---
+            fwd_bwd_speed = 0
+            dist_error = 0
+            if us_dist is not None:
+                dist_error = TARGET_DIST_M - us_dist
+                # Apply deadband
+                if abs(dist_error) > DIST_DEADBAND_M:
+                    fwd_bwd_speed = KP_DIST * dist_error
+            
+            # Clamp forward/backward speed
+            fwd_bwd_speed = clamp(fwd_bwd_speed, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED)
 
-            # --- PID Calculation ---
+            # --- PID Calculation (Turning) ---
             error = get_angle_from_x(cam_x)
+
 
             # Apply deadband
             if abs(error) < ANGLE_DEADBAND_DEG:
@@ -168,9 +231,10 @@ def main():
             # --- Motor Command Generation ---
             turn_effort = clamp(pid_output * TURN_SCALING, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED)
 
-            # Turn in place
-            left_target = -turn_effort
-            right_target = turn_effort
+            # Combine forward/backward and turning efforts
+            left_target = fwd_bwd_speed - turn_effort
+            right_target = fwd_bwd_speed + turn_effort
+
 
             # Apply slew rate limiting for smoother acceleration
             max_change = SLEW_RATE_LIMIT * DT
@@ -191,7 +255,7 @@ def main():
                 pass
 
             # --- Debugging Output ---
-            print(f"Angle: {error:5.1f}° | PID: {pid_output:6.1f} | Turn: {turn_effort:4.0f} | Motors L/R: {int(left_motor):4d},{int(right_motor):4d}")
+            print(f"Angle: {error:5.1f}° | Dist: {us_dist if us_dist else 0.0:4.2f}m | Fwd: {fwd_bwd_speed:4.0f} | Turn: {turn_effort:4.0f} | L/R: {int(left_motor):4d},{int(right_motor):4d}")
 
             # Maintain loop frequency
             elapsed_time = time.time() - loop_start_time
