@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Command Client</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 20px;
+            padding: 30px;
+            max-width: 500px;
+            width: 100%;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        }
+        
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            text-align: center;
+        }
+        
+        .subtitle {
+            color: #666;
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+        
+        .server-config {
+            margin-bottom: 20px;
+            padding: 15px;
+            background: #f5f5f5;
+            border-radius: 10px;
+        }
+        
+        .server-config label {
+            display: block;
+            margin-bottom: 5px;
+            color: #555;
+            font-size: 14px;
+            font-weight: 500;
+        }
+        
+        .server-config input {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            font-size: 14px;
+        }
+        
+        .server-config input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        .button-container {
+            display: flex;
+            justify-content: center;
+            margin-bottom: 30px;
+        }
+        
+        #recordButton {
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            border: none;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            font-size: 18px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+        }
+        
+        #recordButton:hover {
+            transform: scale(1.05);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
+        }
+        
+        #recordButton:active {
+            transform: scale(0.95);
+        }
+        
+        #recordButton.recording {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% {
+                box-shadow: 0 4px 15px rgba(245, 87, 108, 0.4);
+            }
+            50% {
+                box-shadow: 0 4px 25px rgba(245, 87, 108, 0.8);
+            }
+        }
+        
+        .status {
+            text-align: center;
+            margin-bottom: 20px;
+            padding: 10px;
+            border-radius: 8px;
+            font-size: 14px;
+            min-height: 20px;
+        }
+        
+        .status.idle {
+            color: #666;
+        }
+        
+        .status.listening {
+            color: #f5576c;
+            font-weight: bold;
+        }
+        
+        .status.processing {
+            color: #667eea;
+            font-weight: bold;
+        }
+        
+        .result-box {
+            margin-top: 20px;
+            padding: 15px;
+            background: #f9f9f9;
+            border-radius: 10px;
+            border-left: 4px solid #667eea;
+        }
+        
+        .result-box h3 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+        
+        .result-item {
+            margin-bottom: 10px;
+        }
+        
+        .result-item:last-child {
+            margin-bottom: 0;
+        }
+        
+        .result-label {
+            font-weight: 600;
+            color: #555;
+            font-size: 13px;
+            margin-bottom: 3px;
+        }
+        
+        .result-value {
+            color: #333;
+            font-size: 14px;
+            word-wrap: break-word;
+        }
+        
+        .error {
+            background: #fee;
+            border-left-color: #f5576c;
+            color: #c33;
+        }
+        
+        .success {
+            background: #efe;
+            border-left-color: #4caf50;
+            color: #2e7d32;
+        }
+        
+        .mic-icon {
+            font-size: 48px;
+            margin-bottom: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎤 Voice Commands</h1>
+        <p class="subtitle">Speak your command to control the system</p>
+        
+        <div class="server-config">
+            <label for="serverUrl">Server URL:</label>
+            <input type="text" id="serverUrl" value="http://localhost:5000" placeholder="http://localhost:5000">
+        </div>
+        
+        <div class="button-container">
+            <button id="recordButton">
+                <div class="mic-icon">🎤</div>
+                <div>Tap to Speak</div>
+            </button>
+        </div>
+        
+        <div style="text-align: center; margin-bottom: 15px;">
+            <button id="testButton" style="padding: 8px 16px; background: #4caf50; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 14px;">
+                Test Server Connection
+            </button>
+        </div>
+        
+        <div id="status" class="status idle">Ready to listen</div>
+        
+        <div style="margin-top: 20px; padding: 15px; background: #f5f5f5; border-radius: 10px;">
+            <label style="display: block; margin-bottom: 8px; color: #555; font-size: 14px; font-weight: 500;">
+                Or type your command:
+            </label>
+            <input type="text" id="textInput" placeholder="e.g., call my son" 
+                   style="width: 100%; padding: 10px; border: 2px solid #ddd; border-radius: 8px; font-size: 14px;"
+                   onkeypress="if(event.key === 'Enter') { sendTextInput(); }">
+            <button onclick="sendTextInput()" 
+                    style="margin-top: 10px; padding: 8px 16px; background: #667eea; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; width: 100%;">
+                Send Command
+            </button>
+        </div>
+        
+        <div id="result" style="display: none;"></div>
+    </div>
+
+    <script>
+        // Suppress Chrome extension errors (they're harmless but annoying)
+        window.addEventListener('error', (e) => {
+            if (e.message && e.message.includes('message channel closed')) {
+                e.preventDefault();
+                console.warn('[Suppressed] Chrome extension message channel error (harmless)');
+                return false;
+            }
+        });
+        
+        // Also catch unhandled promise rejections
+        window.addEventListener('unhandledrejection', (e) => {
+            if (e.reason && e.reason.message && e.reason.message.includes('message channel closed')) {
+                e.preventDefault();
+                console.warn('[Suppressed] Chrome extension promise rejection (harmless)');
+                return false;
+            }
+        });
+        
+        const recordButton = document.getElementById('recordButton');
+        const testButton = document.getElementById('testButton');
+        const textInput = document.getElementById('textInput');
+        const statusDiv = document.getElementById('status');
+        const resultDiv = document.getElementById('result');
+        const serverUrlInput = document.getElementById('serverUrl');
+        
+        let recognition = null;
+        let isRecording = false;
+        
+        // Debug logging (can be disabled for production)
+        function log(message, ...args) {
+            // Uncomment to enable verbose logging:
+            // console.log('[Voice Client]', message, ...args);
+        }
+        
+        // Check for speech recognition support
+        if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+            log('Speech recognition is supported');
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            recognition = new SpeechRecognition();
+            recognition.continuous = false; // Changed back to false - stops after speech ends
+            recognition.interimResults = true; // Show interim results for feedback
+            recognition.lang = 'en-US';
+            recognition.maxAlternatives = 1;
+            
+            // Increase timeout for no-speech detection
+            // Note: This is a workaround - some browsers don't support this directly
+            
+            recognition.onstart = () => {
+                log('Recognition started');
+                isRecording = true;
+                recordButton.classList.add('recording');
+                recordButton.innerHTML = '<div class="mic-icon">🔴</div><div>Click to Stop</div>';
+                statusDiv.textContent = 'Listening... Speak your command now!';
+                statusDiv.className = 'status listening';
+            };
+            
+            recognition.onaudiostart = () => {
+                log('Audio capture started');
+            };
+            
+            recognition.onsoundstart = () => {
+                log('Sound detected');
+            };
+            
+            recognition.onspeechstart = () => {
+                log('Speech detected - user is speaking');
+                statusDiv.textContent = 'Speech detected! Keep speaking...';
+            };
+            
+            recognition.onsoundend = () => {
+                log('Sound ended');
+            };
+            
+            recognition.onspeechend = () => {
+                log('Speech ended - waiting for final result');
+                statusDiv.textContent = 'Processing speech...';
+            };
+            
+            recognition.onaudioend = () => {
+                log('Audio capture ended');
+            };
+            
+            recognition.onresult = (event) => {
+                log('Recognition result received');
+                let finalTranscript = '';
+                let interimTranscript = '';
+                
+                // Separate final and interim results
+                for (let i = event.resultIndex; i < event.results.length; i++) {
+                    const transcript = event.results[i][0].transcript;
+                    if (event.results[i].isFinal) {
+                        finalTranscript += transcript + ' ';
+                    } else {
+                        interimTranscript += transcript;
+                    }
+                }
+                
+                // Show interim results as user speaks
+                if (interimTranscript) {
+                    statusDiv.textContent = `Heard: "${interimTranscript}"`;
+                    log(`Interim transcript: "${interimTranscript}"`);
+                }
+                
+                // Process final results
+                if (finalTranscript.trim()) {
+                    log(`Final transcript: "${finalTranscript.trim()}"`);
+                    statusDiv.textContent = 'Processing...';
+                    statusDiv.className = 'status processing';
+                    
+                    // Stop recognition and send to server
+                    isRecording = false;
+                    recognition.stop();
+                    sendToServer(finalTranscript.trim());
+                }
+            };
+            
+            recognition.onerror = (event) => {
+                log(`Recognition error: ${event.error}`);
+                console.error('Speech recognition error:', event);
+                
+                let errorMsg = 'Error: ';
+                switch(event.error) {
+                    case 'no-speech':
+                        // For no-speech, restart recognition automatically
+                        log('No speech detected, restarting recognition...');
+                        statusDiv.textContent = 'No speech detected. Try again - speak clearly!';
+                        statusDiv.className = 'status error';
+                        
+                        // Auto-restart after a short delay
+                        setTimeout(() => {
+                            if (!isRecording) {
+                                try {
+                                    recognition.start();
+                                    statusDiv.textContent = 'Listening again... Speak now!';
+                                    statusDiv.className = 'status listening';
+                                } catch (e) {
+                                    log(`Auto-restart failed: ${e.message}`);
+                                    resetButton();
+                                }
+                            }
+                        }, 500);
+                        return; // Don't reset yet
+                    case 'audio-capture':
+                        errorMsg = 'Microphone not found or permission denied.';
+                        break;
+                    case 'not-allowed':
+                        errorMsg = 'Microphone permission denied. Please allow microphone access.';
+                        break;
+                    case 'network':
+                        errorMsg = 'Network error. Check your connection.';
+                        break;
+                    case 'aborted':
+                        // Aborted is usually intentional, don't show error
+                        log('Recognition aborted (likely intentional)');
+                        return;
+                    default:
+                        errorMsg = `Error: ${event.error}`;
+                }
+                
+                statusDiv.textContent = errorMsg;
+                statusDiv.className = 'status error';
+                resetButton();
+            };
+            
+            recognition.onend = () => {
+                log('Recognition ended - state:', recognition.state);
+                
+                // If we're still supposed to be recording and it ended due to no-speech,
+                // we'll let the error handler restart it
+                if (!isRecording) {
+                    // User manually stopped, just reset
+                    resetButton();
+                    return;
+                }
+                
+                // If it ended unexpectedly while we're still recording, 
+                // it might be due to no-speech - the error handler will restart it
+                // Otherwise, reset normally
+                setTimeout(() => {
+                    if (!isRecording) {
+                        resetButton();
+                    }
+                }, 200);
+            };
+            
+            recordButton.addEventListener('click', async () => {
+                if (!isRecording) {
+                    log('Button clicked - starting recognition');
+                    
+                    // Request microphone permission first
+                    try {
+                        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                        stream.getTracks().forEach(track => track.stop()); // Stop immediately, we just needed permission
+                        log('Microphone permission granted');
+                    } catch (err) {
+                        log(`Microphone permission error: ${err.message}`);
+                        statusDiv.textContent = 'Microphone permission denied. Please allow access and refresh.';
+                        statusDiv.className = 'status error';
+                        return;
+                    }
+                    
+                    // Small delay to ensure everything is ready
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                    
+                    try {
+                        // Check if recognition is already running
+                        if (recognition && recognition.state && recognition.state !== 'idle') {
+                            log('Recognition already running, stopping first');
+                            recognition.stop();
+                            await new Promise(resolve => setTimeout(resolve, 200));
+                        }
+                        
+                        recognition.start();
+                        log('Recognition.start() called');
+                    } catch (e) {
+                        log(`Error starting recognition: ${e.message}`);
+                        console.error('Error starting recognition:', e);
+                        
+                        // Handle specific error cases
+                        if (e.message && (e.message.includes('already started') || e.message.includes('started'))) {
+                            statusDiv.textContent = 'Already listening. Please wait...';
+                            // Try to stop and restart
+                            try {
+                                recognition.stop();
+                                setTimeout(() => {
+                                    try {
+                                        recognition.start();
+                                    } catch (e2) {
+                                        log(`Retry failed: ${e2.message}`);
+                                    }
+                                }, 500);
+                            } catch (e3) {
+                                log(`Stop failed: ${e3.message}`);
+                            }
+                        } else {
+                            statusDiv.textContent = `Error: ${e.message || 'Unknown error'}`;
+                            statusDiv.className = 'status error';
+                        }
+                    }
+                } else {
+                    log('Button clicked - stopping recognition');
+                    isRecording = false;
+                    try {
+                        // Give it a moment to finalize any pending results
+                        setTimeout(() => {
+                            recognition.stop();
+                        }, 100);
+                    } catch (e) {
+                        log(`Error stopping recognition: ${e.message}`);
+                    }
+                }
+            });
+        } else {
+            log('Speech recognition NOT supported');
+            recordButton.disabled = true;
+            recordButton.innerHTML = '<div>Not Supported</div>';
+            statusDiv.textContent = 'Speech recognition not supported in this browser. Try Chrome or Edge.';
+            statusDiv.className = 'status error';
+        }
+        
+        function resetButton() {
+            log('Resetting button');
+            isRecording = false;
+            recordButton.classList.remove('recording');
+            recordButton.innerHTML = '<div class="mic-icon">🎤</div><div>Tap to Speak</div>';
+            if (statusDiv.className === 'status processing') {
+                // Keep processing status until response
+                log('Keeping processing status');
+            } else {
+                statusDiv.textContent = 'Ready to listen';
+                statusDiv.className = 'status idle';
+            }
+        }
+        
+        async function sendToServer(text) {
+            const serverUrl = serverUrlInput.value.trim();
+            const endpoint = `${serverUrl}/voice`;
+            
+            log(`Sending to server: ${endpoint}`);
+            log(`Text: "${text}"`);
+            
+            try {
+                const response = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ text: text })
+                });
+                
+                log(`Response status: ${response.status}`);
+                
+                if (!response.ok) {
+                    throw new Error(`Server error: ${response.status} ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                log('Response data:', data);
+                
+                statusDiv.textContent = 'Command processed';
+                statusDiv.className = 'status idle';
+                
+                displayResult(text, data);
+            } catch (error) {
+                log(`Error sending to server: ${error.message}`);
+                console.error('Error sending to server:', error);
+                statusDiv.textContent = `Error: ${error.message}`;
+                statusDiv.className = 'status error';
+                displayError(error.message);
+            } finally {
+                resetButton();
+            }
+        }
+        
+        function displayResult(originalText, response) {
+            resultDiv.style.display = 'block';
+            
+            const intent = response.intent || {};
+            const result = response.result || {};
+            
+            const isSuccess = result.ok !== false;
+            resultDiv.className = `result-box ${isSuccess ? 'success' : 'error'}`;
+            
+            resultDiv.innerHTML = `
+                <h3>${isSuccess ? '✅ Command Processed' : '❌ Error'}</h3>
+                <div class="result-item">
+                    <div class="result-label">You said:</div>
+                    <div class="result-value">"${originalText}"</div>
+                </div>
+                <div class="result-item">
+                    <div class="result-label">Action:</div>
+                    <div class="result-value">${intent.action || 'Unknown'}</div>
+                </div>
+                ${intent.slots && Object.keys(intent.slots).length > 0 ? `
+                    <div class="result-item">
+                        <div class="result-label">Details:</div>
+                        <div class="result-value">${JSON.stringify(intent.slots, null, 2)}</div>
+                    </div>
+                ` : ''}
+                ${result.error ? `
+                    <div class="result-item">
+                        <div class="result-label">Error:</div>
+                        <div class="result-value">${result.error}</div>
+                    </div>
+                ` : ''}
+            `;
+        }
+        
+        function displayError(errorMessage) {
+            resultDiv.style.display = 'block';
+            resultDiv.className = 'result-box error';
+            resultDiv.innerHTML = `
+                <h3>❌ Connection Error</h3>
+                <div class="result-value">${errorMessage}</div>
+                <div class="result-value" style="margin-top: 10px; font-size: 12px; color: #666;">
+                    Make sure the server is running and the URL is correct.
+                </div>
+            `;
+        }
+        
+        // Test server connection
+        testButton.addEventListener('click', async () => {
+            const serverUrl = serverUrlInput.value.trim();
+            statusDiv.textContent = 'Testing connection...';
+            statusDiv.className = 'status processing';
+            
+            try {
+                const response = await fetch(`${serverUrl}/status`);
+                if (response.ok) {
+                    const data = await response.json();
+                    statusDiv.textContent = '✅ Server connected!';
+                    statusDiv.className = 'status success';
+                    log('Server test successful:', data);
+                } else {
+                    throw new Error(`Server returned ${response.status}`);
+                }
+            } catch (error) {
+                statusDiv.textContent = `❌ Connection failed: ${error.message}`;
+                statusDiv.className = 'status error';
+                log('Server test failed:', error);
+            }
+        });
+        
+        // Function to send text input
+        function sendTextInput() {
+            const text = textInput.value.trim();
+            if (!text) {
+                statusDiv.textContent = 'Please enter a command';
+                statusDiv.className = 'status error';
+                return;
+            }
+            
+            log('Sending text input:', text);
+            statusDiv.textContent = 'Processing...';
+            statusDiv.className = 'status processing';
+            sendToServer(text);
+            textInput.value = '';
+        }
+        
+        // Make sendTextInput available globally
+        window.sendTextInput = sendTextInput;
+        
+        // Auto-detect server URL on mobile (try common local IP patterns)
+        if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+            // On desktop, keep localhost
+        } else {
+            // On mobile/phone, try to use the same host
+            const currentHost = window.location.hostname;
+            serverUrlInput.value = `http://${currentHost}:5000`;
+        }
+        
+        // Test microphone access on page load
+        navigator.mediaDevices.getUserMedia({ audio: true })
+            .then(stream => {
+                log('Microphone access confirmed');
+                stream.getTracks().forEach(track => track.stop());
+                statusDiv.textContent = 'Ready to listen (microphone OK)';
+            })
+            .catch(err => {
+                log('Microphone access error:', err.message);
+                statusDiv.textContent = '⚠️ Microphone access denied. Please allow access and refresh.';
+                statusDiv.className = 'status error';
+            });
+    </script>
+</body>
+</html>
+

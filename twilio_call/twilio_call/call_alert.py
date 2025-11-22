@@ -3,7 +3,24 @@ from dotenv import load_dotenv
 from twilio.rest import Client
 
 # Load environment variables from .env file
-load_dotenv()
+# Try multiple possible locations for .env file
+env_paths = [
+    os.path.join(os.path.dirname(__file__), '.env'),  # Same directory as this file
+    os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env'),  # Parent directory
+    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'twilio_call', 'twilio_call', '.env'),  # From repo root
+    '.env',  # Current working directory
+]
+
+env_loaded = False
+for env_path in env_paths:
+    if os.path.exists(env_path):
+        load_dotenv(env_path)
+        env_loaded = True
+        break
+
+if not env_loaded:
+    # Fallback: try loading from default location
+    load_dotenv()
 
 # Load environment variables (support both TWILIO_PHONE_NUMBER and TWILIO_FROM_NUMBER)
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
@@ -62,7 +79,7 @@ def trigger_call(to_number: str, message: str) -> str:
         twiml=twiml
     )
 
-    print(f"[Twilio] Outbound call placed. SID={call.sid}")
+    print(f"[Twilio] Outbound call placed to {to_number}. SID={call.sid}")
     return call.sid
 
 
