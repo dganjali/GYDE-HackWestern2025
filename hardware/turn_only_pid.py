@@ -25,8 +25,8 @@ except Exception:
 
 
 # ----- Defaults (match repo settings) -----
-DEFAULT_OPENMV = "/dev/ttyACM1"
-DEFAULT_ARDUINO = "/dev/ttyUSB1"
+DEFAULT_OPENMV = "/dev/ttyACM0"
+DEFAULT_ARDUINO = "/dev/ttyUSB0"
 BAUD = 115200
 
 # Camera and PID config
