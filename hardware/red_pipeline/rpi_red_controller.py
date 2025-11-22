@@ -25,9 +25,9 @@ IMG_WIDTH = 320  # QVGA width
 CAM_FOV_DEG = 60.0  # Approximate camera horizontal field of view
 
 # PID Controller Gains for turning
-KP = 1.1  # Proportional gain - Lowered to reduce aggressive reaction
+KP = 0.5  # Proportional gain - Lowered to reduce aggressive reaction
 KI = 0.00 # Integral gain - Lowered to prevent overshoot
-KD = 14.0  # Derivative gain - Increased to dampen oscillations
+KD = 7.0  # Derivative gain - Increased to dampen oscillations
 
 # Control Loop Parameters
 LOOP_HZ = 20.0  # Target frequency for the control loop (20 Hz = 50ms per loop)
