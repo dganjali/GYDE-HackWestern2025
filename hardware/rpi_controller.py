@@ -2,7 +2,7 @@
 # Run on Raspberry Pi
 # pip install pyserial
 
-import threading, time, serial, sys, math
+import threading, time, serial, sys, math, struct
 import cv2
 import numpy as np
 import os
@@ -85,68 +85,95 @@ def openmv_reader():
         print("Failed to load MobileNetV2 SSD model:", e)
         net = None
 
+    FRAME_MAGIC = b"FRAM"
+
+    def read_frame(ser):
+        """Read one framed JPEG from OpenMV.
+
+        Protocol: MAGIC (4 bytes) + length (4 bytes, big-endian) + JPEG data.
+        """
+        # Sync to magic header
+        magic_idx = 0
+        while True:
+            b = ser.read(1)
+            if not b:
+                return None
+            if b == FRAME_MAGIC[magic_idx:magic_idx+1]:
+                magic_idx += 1
+                if magic_idx == len(FRAME_MAGIC):
+                    break
+            else:
+                magic_idx = 0
+        # Read 4-byte big-endian length
+        len_bytes = ser.read(4)
+        if len(len_bytes) != 4:
+            return None
+        length = struct.unpack(">I", len_bytes)[0]
+        # Read JPEG payload
+        data = b""
+        while len(data) < length:
+            chunk = ser.read(length - len(data))
+            if not chunk:
+                return None
+            data += chunk
+        return data
+
     while True:
         try:
-            # read bytes until a full JPEG frame is received
-            data = openmv_ser.read_until(b'\xff\xd9')  # JPEG EOF marker
-            
-            if data:
-                np_arr = np.frombuffer(data, dtype=np.uint8)
-                frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-                
-                if frame is not None:
-                    # Ensure 3 channels for DNN
-                    if len(frame.shape) == 2:
-                        frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-                    # Frame from OpenMV is already small (e.g., 160x120); no need to upscale
-                    if net:
-                        # Run human detection
-                        # MobileNetV2 SSD expects 300x300
-                        blob = cv2.dnn.blobFromImage(frame, size=(300, 300), swapRB=True, crop=False)
-                        net.setInput(blob)
-                        detections = net.forward()
-                        
-                        # Parse detections
-                        # Output shape: (1, 1, N, 7) -> [batch, class, score, left, top, right, bottom]
-                        
-                        best_conf = 0.0
-                        best_box = None
-                        best_area = 0
-                        h, w = frame.shape[:2]
-                        
-                        # Iterate over detections
-                        for i in range(detections.shape[2]):
-                            confidence = float(detections[0, 0, i, 2])
-                            if confidence >= PERSON_CONF_THRESH:
-                                class_id = int(detections[0, 0, i, 1])
-                                # Class 1 is 'person' in COCO (check your model's classmap if different)
-                                if class_id == 1:
-                                    # Box is [left, top, right, bottom] normalized
-                                    box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-                                    (sx, sy, ex, ey) = box.astype("int")
-                                    area = max(0, ex - sx) * max(0, ey - sy)
-                                    if area > best_area or (area == best_area and confidence > best_conf):
-                                        best_area = area
-                                        best_conf = confidence
-                                        best_box = (sx, sy, ex, ey)
-                        
-                        if best_box is not None and best_area >= MIN_AREA_PIX:
-                            (startX, startY, endX, endY) = best_box
-                            final_x = int((startX + endX) / 2)
-                            final_y = int((startY + endY) / 2)
+            data = read_frame(openmv_ser)
+            if not data:
+                continue
 
-                            # Rough distance from bbox height
-                            h_pix = max(1, endY - startY)
-                            dist_m = (PERSON_HEIGHT_M * FOCAL_LENGTH_PIX) / float(h_pix)
-                            
-                            state["cam_x"] = final_x
-                            state["cam_y"] = final_y
-                            state["cam_area"] = best_area
-                            state["cam_d"] = dist_m
-                        else:
-                            state["cam_x"] = None
-                            state["cam_y"] = None
-                            state["cam_area"] = None
+            np_arr = np.frombuffer(data, dtype=np.uint8)
+            frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+            if frame is not None:
+                # Ensure 3 channels for DNN
+                if len(frame.shape) == 2:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                if net:
+                    # Run human detection (SSD MobileNet expects 300x300)
+                    blob = cv2.dnn.blobFromImage(frame, size=(300, 300), swapRB=True, crop=False)
+                    net.setInput(blob)
+                    detections = net.forward()
+
+                    best_conf = 0.0
+                    best_box = None
+                    best_area = 0
+                    h, w = frame.shape[:2]
+
+                    # Iterate over detections
+                    for i in range(detections.shape[2]):
+                        confidence = float(detections[0, 0, i, 2])
+                        if confidence >= PERSON_CONF_THRESH:
+                            class_id = int(detections[0, 0, i, 1])
+                            # Class 1 is 'person' in COCO
+                            if class_id == 1:
+                                box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+                                (sx, sy, ex, ey) = box.astype("int")
+                                area = max(0, ex - sx) * max(0, ey - sy)
+                                if area > best_area or (area == best_area and confidence > best_conf):
+                                    best_area = area
+                                    best_conf = confidence
+                                    best_box = (sx, sy, ex, ey)
+
+                    if best_box is not None and best_area >= MIN_AREA_PIX:
+                        (startX, startY, endX, endY) = best_box
+                        final_x = int((startX + endX) / 2)
+                        final_y = int((startY + endY) / 2)
+
+                        # Rough distance from bbox height
+                        h_pix = max(1, endY - startY)
+                        dist_m = (PERSON_HEIGHT_M * FOCAL_LENGTH_PIX) / float(h_pix)
+
+                        state["cam_x"] = final_x
+                        state["cam_y"] = final_y
+                        state["cam_area"] = best_area
+                        state["cam_d"] = dist_m
+                    else:
+                        state["cam_x"] = None
+                        state["cam_y"] = None
+                        state["cam_area"] = None
         except Exception as e:
             print("OpenMV read error:", e)
             time.sleep(0.1)
