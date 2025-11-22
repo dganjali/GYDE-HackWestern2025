@@ -200,8 +200,8 @@
         <p class="subtitle">Speak your command to control the system</p>
         
         <div class="server-config">
-            <label for="serverUrl">Server URL:</label>
-            <input type="text" id="serverUrl" value="http://localhost:5000" placeholder="http://localhost:5000">
+                <label for="serverUrl">Server URL (optional):</label>
+                <input type="text" id="serverUrl" value="" placeholder="Leave empty to use same origin">
         </div>
         
         <div class="button-container">
@@ -264,10 +264,15 @@
         let recognition = null;
         let isRecording = false;
         
-        // Debug logging (can be disabled for production)
+        // Debug logging (can be enabled by uncommenting inside)
         function log(message, ...args) {
-            // Uncomment to enable verbose logging:
             // console.log('[Voice Client]', message, ...args);
+        }
+
+        // Helper to update connection status UI
+        function updateConnectionStatus(text, cls = 'idle') {
+            statusDiv.textContent = text;
+            statusDiv.className = `status ${cls}`;
         }
         
         // Check for speech recognition support
@@ -342,8 +347,7 @@
                 // Process final results
                 if (finalTranscript.trim()) {
                     log(`Final transcript: "${finalTranscript.trim()}"`);
-                    statusDiv.textContent = 'Processing...';
-                    statusDiv.className = 'status processing';
+                    updateConnectionStatus('Processing...', 'processing');
                     
                     // Stop recognition and send to server
                     isRecording = false;
@@ -361,16 +365,14 @@
                     case 'no-speech':
                         // For no-speech, restart recognition automatically
                         log('No speech detected, restarting recognition...');
-                        statusDiv.textContent = 'No speech detected. Try again - speak clearly!';
-                        statusDiv.className = 'status error';
+                        updateConnectionStatus('No speech detected. Try again - speak clearly!', 'error');
                         
                         // Auto-restart after a short delay
                         setTimeout(() => {
                             if (!isRecording) {
                                 try {
                                     recognition.start();
-                                    statusDiv.textContent = 'Listening again... Speak now!';
-                                    statusDiv.className = 'status listening';
+                                    updateConnectionStatus('Listening again... Speak now!', 'listening');
                                 } catch (e) {
                                     log(`Auto-restart failed: ${e.message}`);
                                     resetButton();
@@ -395,8 +397,7 @@
                         errorMsg = `Error: ${event.error}`;
                 }
                 
-                statusDiv.textContent = errorMsg;
-                statusDiv.className = 'status error';
+                        updateConnectionStatus(errorMsg, 'error');
                 resetButton();
             };
             
@@ -432,8 +433,7 @@
                         log('Microphone permission granted');
                     } catch (err) {
                         log(`Microphone permission error: ${err.message}`);
-                        statusDiv.textContent = 'Microphone permission denied. Please allow access and refresh.';
-                        statusDiv.className = 'status error';
+                        updateConnectionStatus('Microphone permission denied. Please allow access and refresh.', 'error');
                         return;
                     }
                     
@@ -505,18 +505,18 @@
                 // Keep processing status until response
                 log('Keeping processing status');
             } else {
-                statusDiv.textContent = 'Ready to listen';
-                statusDiv.className = 'status idle';
+                        updateConnectionStatus('Ready to listen', 'idle');
             }
         }
         
         async function sendToServer(text) {
-            const serverUrl = serverUrlInput.value.trim();
-            const endpoint = `${serverUrl}/voice`;
-            
+            const userUrl = serverUrlInput.value.trim();
+            const base = userUrl || window.location.origin;
+            const endpoint = `${base.replace(/\/$/, '')}/voice`;
+
             log(`Sending to server: ${endpoint}`);
             log(`Text: "${text}"`);
-            
+
             try {
                 const response = await fetch(endpoint, {
                     method: 'POST',
@@ -535,15 +535,13 @@
                 const data = await response.json();
                 log('Response data:', data);
                 
-                statusDiv.textContent = 'Command processed';
-                statusDiv.className = 'status idle';
+                updateConnectionStatus('Command processed', 'idle');
                 
                 displayResult(text, data);
             } catch (error) {
                 log(`Error sending to server: ${error.message}`);
                 console.error('Error sending to server:', error);
-                statusDiv.textContent = `Error: ${error.message}`;
-                statusDiv.className = 'status error';
+                updateConnectionStatus(`Error: ${error.message}`, 'error');
                 displayError(error.message);
             } finally {
                 resetButton();
@@ -598,23 +596,21 @@
         
         // Test server connection
         testButton.addEventListener('click', async () => {
-            const serverUrl = serverUrlInput.value.trim();
-            statusDiv.textContent = 'Testing connection...';
-            statusDiv.className = 'status processing';
-            
+            const userUrl = serverUrlInput.value.trim();
+            const base = userUrl || window.location.origin;
+            updateConnectionStatus('Testing connection...', 'processing');
+
             try {
-                const response = await fetch(`${serverUrl}/status`);
+                const response = await fetch(`${base.replace(/\/$/, '')}/status`);
                 if (response.ok) {
                     const data = await response.json();
-                    statusDiv.textContent = '✅ Server connected!';
-                    statusDiv.className = 'status success';
+                    updateConnectionStatus('✅ Server connected!', 'success');
                     log('Server test successful:', data);
                 } else {
                     throw new Error(`Server returned ${response.status}`);
                 }
             } catch (error) {
-                statusDiv.textContent = `❌ Connection failed: ${error.message}`;
-                statusDiv.className = 'status error';
+                updateConnectionStatus(`❌ Connection failed: ${error.message}`, 'error');
                 log('Server test failed:', error);
             }
         });
@@ -638,13 +634,10 @@
         // Make sendTextInput available globally
         window.sendTextInput = sendTextInput;
         
-        // Auto-detect server URL on mobile (try common local IP patterns)
-        if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
-            // On desktop, keep localhost
-        } else {
-            // On mobile/phone, try to use the same host
-            const currentHost = window.location.hostname;
-            serverUrlInput.value = `http://${currentHost}:5000`;
+        // Default server URL: use same origin if user leaves input empty.
+        // Do NOT force http://host:5000 patterns which break HTTPS/Cloudflare.
+        if (!serverUrlInput.value.trim()) {
+            serverUrlInput.placeholder = window.location.origin + ' (default)';
         }
         
         // Test microphone access on page load
@@ -652,13 +645,23 @@
             .then(stream => {
                 log('Microphone access confirmed');
                 stream.getTracks().forEach(track => track.stop());
-                statusDiv.textContent = 'Ready to listen (microphone OK)';
+                updateConnectionStatus('Ready to listen (microphone OK)', 'idle');
             })
             .catch(err => {
                 log('Microphone access error:', err.message);
-                statusDiv.textContent = '⚠️ Microphone access denied. Please allow access and refresh.';
-                statusDiv.className = 'status error';
+                updateConnectionStatus('⚠️ Microphone access denied. Please allow access and refresh.', 'error');
             });
+
+        // Helper to create a secure WebSocket for current origin + path.
+        // Usage: const ws = createOriginWebSocket('/audio');
+        function createOriginWebSocket(path) {
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+            const wsHost = window.location.host;
+            const normalizedPath = path.startsWith('/') ? path : '/' + path;
+            const url = `${wsProtocol}://${wsHost}${normalizedPath}`;
+            log('Opening WebSocket:', url);
+            return new WebSocket(url);
+        }
     </script>
 </body>
 </html>
