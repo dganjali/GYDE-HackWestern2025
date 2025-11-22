@@ -43,9 +43,9 @@ TARGET_DIST_M = 0.5
 DIST_DEADBAND_M = 0.2  # +/- 20cm, so robot stops between 0.3m and 0.7m
 KP_DIST = 50.0        # Proportional gain for distance control (forward when distance > target)
 BASE_SPEED = 0         # Base speed, we'll use P-control for fwd/bwd
+MIN_DRIVE_SPEED = 40   # Minimum absolute PWM to overcome static friction when moving
 
-# Vision gating (only move when we see a big enough red blob recently)
-MIN_BLOB_AREA_FOR_MOVE = 700   # pixels; tune based on camera QVGA
+# Vision gating (only move when we see a blob recently)
 DETECTION_TIMEOUT_S = 0.5      # seconds; if no OBJ within this, stop
 
 # Safety stop: if ultrasonic says we're closer than this, hard stop
@@ -55,7 +55,6 @@ MIN_SAFE_DISTANCE_M = 0.50
 state = {
     "cam_x": None,          # Center x-coordinate of the detected blob
     "last_cam_update": 0,   # Timestamp of the last valid camera message
-    "cam_area": 0,          # Area (pixels) of the detected blob
     "us_dist": None,        # Distance from the ultrasonic sensor in meters
     "last_us_update": 0,    # Timestamp of the last ultrasonic update
 }
@@ -197,12 +196,11 @@ def main():
             with state_lock:
                 cam_x = state["cam_x"]
                 last_update = state["last_cam_update"]
-                cam_area = state["cam_area"]
                 us_dist = state["us_dist"]
 
             # Vision gating: must see a large-enough blob recently, else STOP
             seen_recently = (time.time() - last_update) <= DETECTION_TIMEOUT_S
-            can_move = (cam_x is not None) and seen_recently and (cam_area >= MIN_BLOB_AREA_FOR_MOVE)
+            can_move = (cam_x is not None) and seen_recently
 
             # Safety stop: ultrasonic too close -> hard stop regardless of vision
             if us_dist is not None and us_dist > 0 and us_dist < MIN_SAFE_DISTANCE_M:
@@ -217,6 +215,9 @@ def main():
                 # Apply deadband
                 if abs(dist_error) > DIST_DEADBAND_M:
                     fwd_bwd_speed = KP_DIST * dist_error
+                    # Ensure a minimum drive to overcome static friction
+                    if abs(fwd_bwd_speed) < MIN_DRIVE_SPEED:
+                        fwd_bwd_speed = MIN_DRIVE_SPEED if fwd_bwd_speed > 0 else -MIN_DRIVE_SPEED
             
             # Clamp forward/backward speed
             fwd_bwd_speed = clamp(fwd_bwd_speed, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED)
@@ -277,7 +278,7 @@ def main():
 
             # --- Debugging Output ---
             print(
-                f"Seen:{'Y' if can_move else 'N'} A={cam_area:4d} | "
+                f"Seen:{'Y' if can_move else 'N'} | "
                 f"Angle:{error:5.1f}° | Dist:{(us_dist if us_dist else 0.0):4.2f}m | "
                 f"Fwd:{fwd_bwd_speed:4.0f} | Turn:{turn_effort:4.0f} | "
                 f"L/R:{int(left_motor):4d},{int(right_motor):4d}"
