@@ -1,9 +1,0 @@
-background
-Boat
-Kayak
-Person NOT in water
-Person drowning
-Person in water
-Sail boat
-Speed boat
-Surf board
