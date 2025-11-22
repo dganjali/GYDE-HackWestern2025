@@ -122,16 +122,27 @@ def openmv_reader():
         try:
             data = read_frame(openmv_ser)
             if not data:
+                print("read_frame: no data")
                 continue
 
             np_arr = np.frombuffer(data, dtype=np.uint8)
             frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
-            if frame is not None:
-                # Ensure 3 channels for DNN
-                if len(frame.shape) == 2:
-                    frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-                if net:
+            if frame is None:
+                print("imdecode: got None")
+                continue
+
+            # Debug: report incoming frame size
+            try:
+                h, w = frame.shape[:2]
+                print(f"FRAME: {w}x{h}")
+            except Exception:
+                print("FRAME: unknown shape")
+
+            # Ensure 3 channels for DNN
+            if len(frame.shape) == 2:
+                frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+            if net:
                     # Run human detection (SSD MobileNet expects 300x300)
                     blob = cv2.dnn.blobFromImage(frame, size=(300, 300), swapRB=True, crop=False)
                     net.setInput(blob)
@@ -166,11 +177,13 @@ def openmv_reader():
                         h_pix = max(1, endY - startY)
                         dist_m = (PERSON_HEIGHT_M * FOCAL_LENGTH_PIX) / float(h_pix)
 
+                        print(f"DETECT: conf={best_conf:.2f} area={best_area} cx={final_x} cy={final_y} dist={dist_m:.2f}m")
                         state["cam_x"] = final_x
                         state["cam_y"] = final_y
                         state["cam_area"] = best_area
                         state["cam_d"] = dist_m
                     else:
+                        print("NO PERSON DETECTED")
                         state["cam_x"] = None
                         state["cam_y"] = None
                         state["cam_area"] = None

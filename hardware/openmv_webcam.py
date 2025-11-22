@@ -5,7 +5,7 @@ import struct
 # Initialize camera
 sensor.reset()
 sensor.set_pixformat(sensor.RGB565)
-sensor.set_framesize(sensor.QVGA)  # 320x240 base resolution
+sensor.set_framesize(sensor.QQVGA)  # 320x240 base resolution
 sensor.skip_frames(time=2000)
 
 # UART3 on OpenMV, 115200 baud (matches rpi_controller.py)
@@ -19,8 +19,6 @@ clock = time.clock()
 while True:
     clock.tick()
     img = sensor.snapshot()
-    # Resize to 160x120 to match Pi expectations
-    img = img.resize(160, 120)
     # Convert to grayscale to reduce bandwidth
     img = img.to_grayscale()
 
