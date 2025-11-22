@@ -1,0 +1,11 @@
+Micropython
+
+## Constants: (for OpenMV H7 Cam Plus)
+    # # Frame size: QVGA = 320x240 pixels
+    # Width: 320 pixels
+    # Height: 240 pixels
+
+
+    # # Center point: (160, 120) (div // 2)
+
+    # GRANTED This parameter is set: sensor.set_framesize(sensor.QVGA)
