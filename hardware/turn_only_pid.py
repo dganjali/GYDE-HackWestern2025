@@ -33,9 +33,9 @@ BAUD = 115200
 IMG_WIDTH = 240
 CAM_FOV_DEG = 60.0
 # Default PID gains (tweak below or via CLI)
-KP = 2.2
+KP = 3.0
 KI = 0.0
-KD = 1.2
+KD = 8.5
 # control loop interval (s)
 DT = 0.03  # ~33 Hz for faster response
 # scale to convert PID output (degrees) -> motor speed
@@ -47,7 +47,10 @@ INTEGRAL_LIMIT = 100.0
 # slew rate default (units per second)
 SLEW_RATE = 800.0
 # derivative filter time constant (s). Small values = less filtering.
-D_FILTER_TAU = 0.02
+D_FILTER_TAU = 0.04
+# Adaptive scaling configuration: make aggressive scaling less extreme to avoid overshoot
+ADAPTIVE_DENOM = 30.0
+ADAPTIVE_MAX_EXTRA = 1.0  # max additional multiplier over 1.0 (so max scale = 1 + ADAPTIVE_MAX_EXTRA)
 
 
 def clamp(v, lo=-255, hi=255):
@@ -66,10 +69,19 @@ class SharedState:
     def __init__(self):
         self.lock = threading.Lock()
         self.cam_x = None
+        self.seq = None
+        self.openmv_ts = None
+        self.recv_ms = None
 
     def set_cam_x(self, x):
         with self.lock:
             self.cam_x = x
+
+    def set_meta(self, seq, ts, recv_ms):
+        with self.lock:
+            self.seq = seq
+            self.openmv_ts = ts
+            self.recv_ms = recv_ms
 
     def get_cam_x(self):
         with self.lock:
@@ -87,16 +99,28 @@ def openmv_reader(ser, state):
         if not line:
             continue
         parts = line.split()
-        if parts and parts[0] == 'OBJ' and len(parts) >= 4:
+        if parts and parts[0] == 'OBJ':
             try:
-                x = int(parts[1])
-                # y = int(parts[2])
-                # d = float(parts[3])
+                if len(parts) >= 6:
+                    seq = int(parts[1])
+                    x = int(parts[2])
+                    # y = int(parts[3])
+                    # d = float(parts[4])
+                    ts = int(parts[5])
+                elif len(parts) >= 4:
+                    seq = None
+                    x = int(parts[1])
+                    ts = None
+                else:
+                    state.set_cam_x(None)
+                    continue
             except Exception:
                 state.set_cam_x(None)
                 continue
             if x >= 0:
                 state.set_cam_x(x)
+                recv_ms = int(time.time() * 1000)
+                state.set_meta(seq, ts, recv_ms)
             else:
                 state.set_cam_x(None)
 
@@ -134,6 +158,7 @@ def main():
     p.add_argument('--kp', type=float, default=KP, help='Proportional gain')
     p.add_argument('--ki', type=float, default=KI, help='Integral gain')
     p.add_argument('--kd', type=float, default=KD, help='Derivative gain')
+    p.add_argument('--simple-proportional', action='store_true', help='Use a simple P-only controller (no I/D) similar to a servo')
     p.add_argument('--turn-scale', type=float, default=TURN_SCALE, help='Scale from PID output to motor differential')
     p.add_argument('--dt', type=float, default=DT, help='Control loop interval in seconds')
     p.add_argument('--max-speed', type=int, default=MAX_SPEED, help='Max motor speed magnitude')
@@ -150,6 +175,7 @@ def main():
     kp = args.kp
     ki = args.ki
     kd = args.kd
+    simple_prop = args.simple_proportional
     turn_scale = args.turn_scale
     dt = args.dt
     max_speed = args.max_speed
@@ -248,27 +274,34 @@ def main():
                     err = 0.0
                 else:
                     err = -angle
-                integral += err * dt
-                # anti-windup clamp
-                if integral > int_limit:
-                    integral = int_limit
-                elif integral < -int_limit:
-                    integral = -int_limit
+                    if simple_prop:
+                        # simple proportional control (servo-like): direct mapping
+                        turn_output = kp * err
+                        eff_turn_scale = turn_scale
+                        diff = int(max(-max_speed, min(max_speed, turn_output * eff_turn_scale)))
+                    else:
+                        integral += err * dt
+                        # anti-windup clamp
+                        if integral > int_limit:
+                            integral = int_limit
+                        elif integral < -int_limit:
+                            integral = -int_limit
 
-                # derivative (filtered) to reduce noise-driven D spikes
-                derivative_raw = (err - prev_err) / dt
-                alpha = dt / (d_filter_tau + dt) if d_filter_tau > 0.0 else 1.0
-                derivative = alpha * derivative_raw + (1.0 - alpha) * prev_derivative
-                prev_derivative = derivative
-                prev_err = err
+                        # derivative (filtered) to reduce noise-driven D spikes
+                        derivative_raw = (err - prev_err) / dt
+                        alpha = dt / (d_filter_tau + dt) if d_filter_tau > 0.0 else 1.0
+                        derivative = alpha * derivative_raw + (1.0 - alpha) * prev_derivative
+                        prev_derivative = derivative
+                        prev_err = err
 
-                turn_output = kp * err + ki * integral + kd * derivative
+                        turn_output = kp * err + ki * integral + kd * derivative
 
-                # adaptive turn scaling: be more aggressive for large angle errors
-                adaptive_scale = 1.0 + min(abs(err) / 20.0, 2.0)
-                eff_turn_scale = turn_scale * adaptive_scale
+                        # adaptive turn scaling: be more conservative to avoid overshoot
+                        adaptive_extra = min(abs(err) / ADAPTIVE_DENOM, ADAPTIVE_MAX_EXTRA)
+                        adaptive_scale = 1.0 + adaptive_extra
+                        eff_turn_scale = turn_scale * adaptive_scale
 
-                diff = int(max(-max_speed, min(max_speed, turn_output * eff_turn_scale)))
+                        diff = int(max(-max_speed, min(max_speed, turn_output * eff_turn_scale)))
                 # in-place rotation using active_sign
                 left = active_sign * diff
                 right = -active_sign * diff
@@ -296,7 +329,16 @@ def main():
             send_cmd(arduino_ser, left, right)
             prev_left = left
             prev_right = right
-            print(f"CAM_X={cam_x} ANGLE={angle} L={left} R={right}")
+            # print latency info if available
+            with state.lock:
+                meta_seq = state.seq
+                meta_ts = state.openmv_ts
+                meta_recv = state.recv_ms
+            if meta_ts is not None and meta_recv is not None:
+                lag = meta_recv - meta_ts
+                print(f"SEQ={meta_seq} LAG={lag}ms CAM_X={cam_x} ANGLE={angle} L={left} R={right}")
+            else:
+                print(f"CAM_X={cam_x} ANGLE={angle} L={left} R={right}")
             time.sleep(dt)
 
     except KeyboardInterrupt:
