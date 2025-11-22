@@ -25,25 +25,27 @@ IMG_WIDTH = 320  # QVGA width
 CAM_FOV_DEG = 60.0  # Approximate camera horizontal field of view
 
 # PID Controller Gains for turning
-KP = 0.5  # Proportional gain - Lowered to reduce aggressive reaction
-KI = 0.00 # Integral gain - Lowered to prevent overshoot
-KD = 8.0  # Derivative gain - Increased to dampen oscillations
+KP = 0.45  # Proportional gain - gentle to avoid overshoot
+KI = 0.00  # Integral off for stability
+KD = 6.0   # Derivative gain - damping, reduced with smoothing
 
 # Control Loop Parameters
 LOOP_HZ = 20.0  # Target frequency for the control loop (20 Hz = 50ms per loop)
 DT = 1.0 / LOOP_HZ
 MAX_MOTOR_SPEED = 200  # Max PWM value for motors (0-255)
-TURN_SCALING = 2.0     # Scales PID output to motor speed difference - Lowered for less aggressive turns
+TURN_SCALING = 2.2     # Slightly higher steering authority after sign fix
 ANGLE_DEADBAND_DEG = 2.5 # Ignore small angle errors to prevent jitter
 INTEGRAL_LIMIT = 150.0   # Prevents integral wind-up
 SLEW_RATE_LIMIT = 800.0  # Max change in motor speed per second to smooth motion
+ERR_SMOOTH_ALPHA = 0.5   # 0..1; higher = more smoothing
+SMALL_ANGLE_PRIORITIZE_FWD_DEG = 8.0  # Below this, attenuate turning to prefer forward motion
 
 # Distance Control
 TARGET_DIST_M = 0.5
 DIST_DEADBAND_M = 0.2  # +/- 20cm, so robot stops between 0.3m and 0.7m
-KP_DIST = 50.0        # Proportional gain for distance control (m/s per meter error)
+KP_DIST = 100.0       # Stronger forward when far
 BASE_SPEED = 0         # Base speed, we'll use P-control for fwd/bwd
-MIN_DRIVE_SPEED = 50   # Minimum absolute PWM to overcome static friction when moving
+MIN_DRIVE_SPEED = 60   # Minimum absolute PWM to overcome static friction when moving
 
 # Drive polarity and trims
 # If forward/back looks inverted on your robot, flip FORWARD_SIGN to -1 or 1 accordingly.
@@ -193,6 +195,7 @@ def main():
     prev_error = 0.0
     prev_left_motor = 0.0
     prev_right_motor = 0.0
+    error_filt = 0.0
 
     try:
         while True:
@@ -229,7 +232,10 @@ def main():
             fwd_bwd_speed = clamp(fwd_bwd_speed, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED)
 
             # --- PID Calculation (Turning) ---
-            error = get_angle_from_x(cam_x) if can_move else 0.0
+            error_raw = get_angle_from_x(cam_x) if can_move else 0.0
+            # Exponential smoothing to reduce oscillations from noisy centroid
+            error_filt = (ERR_SMOOTH_ALPHA * error_filt) + ((1.0 - ERR_SMOOTH_ALPHA) * error_raw)
+            error = error_filt
 
 
             # Apply deadband
@@ -255,10 +261,23 @@ def main():
             # --- Motor Command Generation ---
             turn_effort = clamp(pid_output * TURN_SCALING, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED)
 
-            # Combine forward/backward and turning efforts (apply trims only when moving)
+            # Prioritize forward over small turns: attenuate turning for small angle errors
             if can_move:
-                left_target = (fwd_bwd_speed - turn_effort) + MOTOR_LEFT_TRIM
-                right_target = (fwd_bwd_speed + turn_effort) + MOTOR_RIGHT_TRIM
+                ae = abs(error)
+                if ae < SMALL_ANGLE_PRIORITIZE_FWD_DEG:
+                    # Linear attenuation from 0..1 over 0..threshold
+                    att = ae / SMALL_ANGLE_PRIORITIZE_FWD_DEG
+                    turn_effort *= att
+
+                # Forward priority under saturation: cap turn so sum with fwd doesn't exceed max
+                max_turn_allowed = max(0, MAX_MOTOR_SPEED - abs(fwd_bwd_speed))
+                turn_effort = clamp(turn_effort, -max_turn_allowed, max_turn_allowed)
+
+            # Combine forward/backward and turning efforts (apply trims only when moving)
+            # Sign fix: positive turn_effort should turn RIGHT -> left higher than right
+            if can_move:
+                left_target = (fwd_bwd_speed + turn_effort) + MOTOR_LEFT_TRIM
+                right_target = (fwd_bwd_speed - turn_effort) + MOTOR_RIGHT_TRIM
             else:
                 left_target = 0
                 right_target = 0
