@@ -7,7 +7,7 @@ It reads OBJ x y d lines from the OpenMV serial, runs a PID on heading (camera x
 and sends in-place rotation commands to the Arduino in the format "T<left>,<right>\n".
 
 Usage:
-  python3 hardware/turn_only_pid.py --openmv /dev/ttyACM1 --arduino /dev/ttyUSB1
+    python3 hardware/turn_only_pid.py --openmv /dev/ttyACM0 --arduino /dev/ttyUSB0
 
 This intentionally ignores distance and only adjusts heading.
 """
