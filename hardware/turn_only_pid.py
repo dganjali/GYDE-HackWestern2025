@@ -33,9 +33,9 @@ BAUD = 115200
 IMG_WIDTH = 240
 CAM_FOV_DEG = 60.0
 # Default PID gains (tweak below or via CLI)
-KP = 0.9
+KP = 1.6
 KI = 0.0
-KD = 0.25
+KD = 0.6
 # control loop interval (s)
 DT = 0.05  # 20 Hz
 # scale to convert PID output (degrees) -> motor speed
