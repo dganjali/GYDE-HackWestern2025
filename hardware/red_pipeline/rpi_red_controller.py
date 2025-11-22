@@ -41,13 +41,21 @@ SLEW_RATE_LIMIT = 800.0  # Max change in motor speed per second to smooth motion
 # Distance Control
 TARGET_DIST_M = 0.5
 DIST_DEADBAND_M = 0.2  # +/- 20cm, so robot stops between 0.3m and 0.7m
-KP_DIST = -200.0        # Proportional gain for distance control
+KP_DIST = 50.0        # Proportional gain for distance control (forward when distance > target)
 BASE_SPEED = 0         # Base speed, we'll use P-control for fwd/bwd
+
+# Vision gating (only move when we see a big enough red blob recently)
+MIN_BLOB_AREA_FOR_MOVE = 700   # pixels; tune based on camera QVGA
+DETECTION_TIMEOUT_S = 0.5      # seconds; if no OBJ within this, stop
+
+# Safety stop: if ultrasonic says we're closer than this, hard stop
+MIN_SAFE_DISTANCE_M = 0.50
 
 # Shared state for sensor data (thread-safe)
 state = {
     "cam_x": None,          # Center x-coordinate of the detected blob
     "last_cam_update": 0,   # Timestamp of the last valid camera message
+    "cam_area": 0,          # Area (pixels) of the detected blob
     "us_dist": None,        # Distance from the ultrasonic sensor in meters
     "last_us_update": 0,    # Timestamp of the last ultrasonic update
 }
@@ -77,13 +85,18 @@ def openmv_reader_thread():
 
                     msg_type = parts[0]
                     with state_lock:
-                        if msg_type == "OBJ" and len(parts) >= 3:
+                        if msg_type == "OBJ" and len(parts) >= 6:
                             # "OBJ <seq> <cx> <cy> <area> <ts>"
-                            state["cam_x"] = int(parts[2])
-                            state["last_cam_update"] = time.time()
+                            try:
+                                state["cam_x"] = int(parts[2])
+                                state["cam_area"] = int(parts[4])
+                                state["last_cam_update"] = time.time()
+                            except ValueError:
+                                pass
                         elif msg_type == "NOOBJ":
                             # No object was seen
                             state["cam_x"] = None
+                            state["cam_area"] = 0
         except serial.SerialException as e:
             print(f"OpenMV serial error: {e}. Retrying in 5 seconds...")
             time.sleep(5)
@@ -166,12 +179,7 @@ def main():
         print(f"Fatal: Could not open Arduino port {ARDUINO_PORT}: {e}")
         sys.exit(1)
 
-    # Start the Arduino reader thread
-    arduino_reader = threading.Thread(target=arduino_reader_thread, args=(arduino,), daemon=True)
-    arduino_reader.start()
-
-
-    # Start the Arduino reader thread
+    # Start the Arduino reader thread (once)
     arduino_reader = threading.Thread(target=arduino_reader_thread, args=(arduino,), daemon=True)
     arduino_reader.start()
 
@@ -189,17 +197,23 @@ def main():
             with state_lock:
                 cam_x = state["cam_x"]
                 last_update = state["last_cam_update"]
+                cam_area = state["cam_area"]
                 us_dist = state["us_dist"]
 
-            # Safety check: if no camera data for > 0.5s, stop turning.
-            if time.time() - last_update > 0.5:
-                cam_x = None
+            # Vision gating: must see a large-enough blob recently, else STOP
+            seen_recently = (time.time() - last_update) <= DETECTION_TIMEOUT_S
+            can_move = (cam_x is not None) and seen_recently and (cam_area >= MIN_BLOB_AREA_FOR_MOVE)
+
+            # Safety stop: ultrasonic too close -> hard stop regardless of vision
+            if us_dist is not None and us_dist > 0 and us_dist < MIN_SAFE_DISTANCE_M:
+                can_move = False
             
             # --- Distance Controller (P-controller) ---
             fwd_bwd_speed = 0
             dist_error = 0
-            if us_dist is not None:
-                dist_error = TARGET_DIST_M - us_dist
+            if can_move and (us_dist is not None):
+                # Positive error => we're too far (move forward)
+                dist_error = us_dist - TARGET_DIST_M
                 # Apply deadband
                 if abs(dist_error) > DIST_DEADBAND_M:
                     fwd_bwd_speed = KP_DIST * dist_error
@@ -208,7 +222,7 @@ def main():
             fwd_bwd_speed = clamp(fwd_bwd_speed, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED)
 
             # --- PID Calculation (Turning) ---
-            error = get_angle_from_x(cam_x)
+            error = get_angle_from_x(cam_x) if can_move else 0.0
 
 
             # Apply deadband
@@ -217,9 +231,12 @@ def main():
                 # Decay integral when in deadband to prevent overshoot
                 integral *= 0.9
 
-            # Integral term with anti-windup
-            integral += error * DT
-            integral = clamp(integral, -INTEGRAL_LIMIT, INTEGRAL_LIMIT)
+            # Integral term with anti-windup (reset when not moving)
+            if can_move:
+                integral += error * DT
+                integral = clamp(integral, -INTEGRAL_LIMIT, INTEGRAL_LIMIT)
+            else:
+                integral = 0.0
 
             # Derivative term
             derivative = (error - prev_error) / DT
@@ -232,8 +249,8 @@ def main():
             turn_effort = clamp(pid_output * TURN_SCALING, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED)
 
             # Combine forward/backward and turning efforts
-            left_target = fwd_bwd_speed - turn_effort
-            right_target = fwd_bwd_speed + turn_effort
+            left_target = fwd_bwd_speed - turn_effort if can_move else 0
+            right_target = fwd_bwd_speed + turn_effort if can_move else 0
 
 
             # Apply slew rate limiting for smoother acceleration
@@ -245,6 +262,10 @@ def main():
             prev_right_motor = right_motor
 
             # --- Send Command to Arduino ---
+            # If cannot move, send a stop command explicitly
+            if not can_move:
+                left_motor = 0
+                right_motor = 0
             cmd = f"T{int(left_motor)},{int(right_motor)}\n"
             try:
                 arduino.write(cmd.encode('utf-8'))
@@ -255,7 +276,12 @@ def main():
                 pass
 
             # --- Debugging Output ---
-            print(f"Angle: {error:5.1f}° | Dist: {us_dist if us_dist else 0.0:4.2f}m | Fwd: {fwd_bwd_speed:4.0f} | Turn: {turn_effort:4.0f} | L/R: {int(left_motor):4d},{int(right_motor):4d}")
+            print(
+                f"Seen:{'Y' if can_move else 'N'} A={cam_area:4d} | "
+                f"Angle:{error:5.1f}° | Dist:{(us_dist if us_dist else 0.0):4.2f}m | "
+                f"Fwd:{fwd_bwd_speed:4.0f} | Turn:{turn_effort:4.0f} | "
+                f"L/R:{int(left_motor):4d},{int(right_motor):4d}"
+            )
 
             # Maintain loop frequency
             elapsed_time = time.time() - loop_start_time
