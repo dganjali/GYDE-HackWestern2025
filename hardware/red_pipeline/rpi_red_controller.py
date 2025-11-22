@@ -61,9 +61,9 @@ DETECTION_TIMEOUT_S = 0.5      # seconds; if no OBJ within this, stop
 # Safety stop: if ultrasonic says we're closer than this, hard stop (unless backing up allowed)
 MIN_SAFE_DISTANCE_M = 0.40
 
-# Fall detection (object near bottom of frame for sustained time)
-FALL_Y_FRACTION = 0.75   # bottom 25% of frame (set 0.66 for bottom third)
-FALL_HOLD_S = 10.0       # seconds sustained before alert
+# Fall detection (object near bottom of frame)
+FALL_Y_FRACTION = 0.75     # bottom 25% of frame (set 0.66 for bottom third)
+FALL_ALERT_PERIOD_S = 1.0  # repeat alert at most once per second while low
 
 # Close-proximity backup behavior
 BACKUP_MODE_ENABLED = True
@@ -79,8 +79,8 @@ state = {
     "last_cam_update": 0,   # Timestamp of the last valid camera message
     "us_dist": None,        # Distance from the ultrasonic sensor in meters
     "last_us_update": 0,    # Timestamp of the last ultrasonic update
-    "fall_since": None,     # timestamp when low-y condition started
-    "fall_alerted": False,  # whether alert already printed for current low state
+    "fall_low_active": False,   # whether currently low
+    "fall_last_alert_ts": 0.0,  # last time we printed an alert
 }
 state_lock = threading.Lock()
 
@@ -226,8 +226,6 @@ def main():
                 cam_y = state["cam_y"]
                 last_update = state["last_cam_update"]
                 us_dist = state["us_dist"]
-                fall_since = state["fall_since"]
-                fall_alerted = state["fall_alerted"]
 
             # Vision gating: must see a blob recently, else STOP
             seen_recently = (time.time() - last_update) <= DETECTION_TIMEOUT_S
@@ -245,20 +243,18 @@ def main():
             if us_dist is not None and us_dist > 0 and us_dist < MIN_SAFE_DISTANCE_M and not backup_allowed:
                 can_move = False
             
-            # --- Fall detection: low vertical position sustained ---
+            # --- Fall detection: immediate alert while low (throttled) ---
             now = time.time()
             threshold_y = int(IMG_HEIGHT * FALL_Y_FRACTION)
+            low_now = seen_recently and (cam_y is not None) and (cam_y >= threshold_y)
             with state_lock:
-                if can_move and cam_y is not None and cam_y >= threshold_y:
-                    if state["fall_since"] is None:
-                        state["fall_since"] = now
-                    elif (not state["fall_alerted"]) and (now - state["fall_since"]) >= FALL_HOLD_S:
-                        state["fall_alerted"] = True
-                        print("[ALERT] Fall suspected: red target low in frame for >= {:.0f}s".format(FALL_HOLD_S), flush=True)
+                if low_now:
+                    if (not state["fall_low_active"]) or (now - state["fall_last_alert_ts"]) >= FALL_ALERT_PERIOD_S:
+                        print("ALRT ALRT: red target low in frame", flush=True)
+                        state["fall_last_alert_ts"] = now
+                    state["fall_low_active"] = True
                 else:
-                    # Reset when condition not met or target not seen
-                    state["fall_since"] = None
-                    state["fall_alerted"] = False
+                    state["fall_low_active"] = False
             
             # --- Distance Controller (P-controller) ---
             fwd_bwd_speed = 0
