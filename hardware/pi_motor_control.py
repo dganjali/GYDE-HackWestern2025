@@ -57,9 +57,20 @@ def reader_thread(ser):
                 text = line.decode('utf-8', errors='replace').strip()
             except Exception:
                 text = str(line)
-            print("[ARDUINO]", text)
+            # Print on its own line and re-print prompt to avoid corrupting user input
+            try:
+                sys.stdout.write("\n[ARDUINO] " + text + "\n> ")
+                sys.stdout.flush()
+            except Exception:
+                # fallback
+                print("[ARDUINO]", text)
         except Exception as e:
-            print("Serial read error:", e)
+            # Print error on its own line and re-print prompt
+            try:
+                sys.stdout.write("\nSerial read error: {}\n> ".format(e))
+                sys.stdout.flush()
+            except Exception:
+                print("Serial read error:", e)
             time.sleep(0.5)
 
 
@@ -120,6 +131,24 @@ def main():
                     except Exception as e:
                         print("Write error:", e)
                 print("[SENT] STOP")
+                continue
+            # Single-letter shortcuts
+            if cmd == 'l':
+                # left in place at default speed (120)
+                s = 120
+                send_tank(ser, -s, s)
+                continue
+            if cmd == 'r':
+                s = 120
+                send_tank(ser, s, -s)
+                continue
+            if cmd == 'f':
+                s = 120
+                send_tank(ser, s, s)
+                continue
+            if cmd == 'b':
+                s = 120
+                send_tank(ser, -s, -s)
                 continue
             if cmd in ('tank', 'raw') and len(parts) >= 3:
                 l = clamp(parts[1])
