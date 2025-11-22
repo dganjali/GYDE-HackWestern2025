@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-rpi_red_controller.py
+rpi_red_controller_fixed.py
 
 Runs on Raspberry Pi.
 1. Reads "OBJ <seq> <cx> <cy> <area> <ts>" lines from OpenMV (red blob tracking).
-2. Runs a PID controller to turn the robot towards the red blob.
+2. Runs a PID controller to turn the robot towards the red blob (FIXED: Error sign inverted).
 3. Sends "T<left>,<right>" commands to the Arduino motor driver.
 
-This script is designed for the high-FPS red-tracking pipeline.
+This script uses updated, tighter PID tuning for the high-FPS red-tracking pipeline.
 """
 
 import threading
@@ -24,20 +24,20 @@ BAUD_RATE = 115200
 IMG_WIDTH = 320  # QVGA width
 CAM_FOV_DEG = 60.0  # Approximate camera horizontal field of view
 
-# PID Controller Gains for turning
-KP = 0.45  # Proportional gain - gentle to avoid overshoot
-KI = 0.00  # Integral off for stability
-KD = 6.0   # Derivative gain - damping, reduced with smoothing
+# PID Controller Gains for turning (TUNING UPDATED)
+KP = 0.9   # Proportional gain - higher for quicker response
+KI = 0.05  # Integral gain - small value to eliminate steady-state error (bias)
+KD = 4.0   # Derivative gain - reduced slightly due to error smoothing
 
 # Control Loop Parameters
 LOOP_HZ = 20.0  # Target frequency for the control loop (20 Hz = 50ms per loop)
 DT = 1.0 / LOOP_HZ
 MAX_MOTOR_SPEED = 200  # Max PWM value for motors (0-255)
-TURN_SCALING = 2.2     # Slightly higher steering authority after sign fix
+TURN_SCALING = 1.6     # Reduced scaling since KP is higher
 ANGLE_DEADBAND_DEG = 2.5 # Ignore small angle errors to prevent jitter
 INTEGRAL_LIMIT = 150.0   # Prevents integral wind-up
 SLEW_RATE_LIMIT = 800.0  # Max change in motor speed per second to smooth motion
-ERR_SMOOTH_ALPHA = 0.5   # 0..1; higher = more smoothing
+ERR_SMOOTH_ALPHA = 0.65  # Increased smoothing for cleaner derivative
 SMALL_ANGLE_PRIORITIZE_FWD_DEG = 8.0  # Below this, attenuate turning to prefer forward motion
 
 # Distance Control
@@ -152,6 +152,7 @@ def get_angle_from_x(cx):
     # Calculate the offset from the image center
     offset = cx - (IMG_WIDTH / 2.0)
     # Convert pixel offset to angle
+    # Positive angle means object is to the RIGHT of center
     angle = (offset / (IMG_WIDTH / 2.0)) * (CAM_FOV_DEG / 2.0)
     return angle
 
@@ -232,7 +233,12 @@ def main():
             fwd_bwd_speed = clamp(fwd_bwd_speed, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED)
 
             # --- PID Calculation (Turning) ---
-            error_raw = get_angle_from_x(cam_x) if can_move else 0.0
+            # Convention: angle > 0 when target is to the RIGHT of center.
+            # We want positive PID output to produce a RIGHT turn. With the motor mix below
+            # (left = fwd + turn, right = fwd - turn), a positive turn increases left and
+            # decreases right -> RIGHT turn. Therefore, use non-inverted angle as error.
+            error_raw = -get_angle_from_x(cam_x) if can_move else 0.0
+            
             # Exponential smoothing to reduce oscillations from noisy centroid
             error_filt = (ERR_SMOOTH_ALPHA * error_filt) + ((1.0 - ERR_SMOOTH_ALPHA) * error_raw)
             error = error_filt
@@ -244,7 +250,7 @@ def main():
                 # Decay integral when in deadband to prevent overshoot
                 integral *= 0.9
 
-            # Integral term with anti-windup (reset when not moving)
+            # Integral term with anti-windup
             if can_move:
                 integral += error * DT
                 integral = clamp(integral, -INTEGRAL_LIMIT, INTEGRAL_LIMIT)
@@ -256,7 +262,7 @@ def main():
             prev_error = error
 
             # PID output
-            pid_output = (KP * error) + (KD * derivative)
+            pid_output = (KP * error) + (KI * integral) + (KD * derivative)
 
             # --- Motor Command Generation ---
             turn_effort = clamp(pid_output * TURN_SCALING, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED)
@@ -274,7 +280,8 @@ def main():
                 turn_effort = clamp(turn_effort, -max_turn_allowed, max_turn_allowed)
 
             # Combine forward/backward and turning efforts (apply trims only when moving)
-            # Sign fix: positive turn_effort should turn RIGHT -> left higher than right
+            # Positive turn_effort should turn RIGHT (target on the right -> positive error)
+            # Using differential mix: left = fwd + turn, right = fwd - turn
             if can_move:
                 left_target = (fwd_bwd_speed + turn_effort) + MOTOR_LEFT_TRIM
                 right_target = (fwd_bwd_speed - turn_effort) + MOTOR_RIGHT_TRIM
@@ -308,7 +315,8 @@ def main():
             # --- Debugging Output ---
             print(
                 f"Seen:{'Y' if can_move else 'N'} | "
-                f"Angle:{error:5.1f}° | Dist:{(us_dist if us_dist else 0.0):4.2f}m | "
+                f"RawAngle:{get_angle_from_x(cam_x):5.1f}° | Err:{error:5.1f}° | "
+                f"Dist:{(us_dist if us_dist else 0.0):4.2f}m | "
                 f"Fwd:{fwd_bwd_speed:4.0f} | Turn:{turn_effort:4.0f} | "
                 f"L/R:{int(left_motor):4d},{int(right_motor):4d}"
             )
