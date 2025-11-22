@@ -1,78 +1,103 @@
-# openmv_obj.py
-#
-# Detect a blob/contour and send: "OBJ x y d\n"
-# x,y are pixel coords (center), d is distance in meters (float)
-#
-# Tune THRESHOLD or use find_blobs with color thresholds depending on target.
+import time
+import sensor
+import ml
+from ml.postprocessing import yolo_lc_postprocess
+from pyb import LED, USB_VCP
 
-import sensor, image, time, pyb
+# Initialize LED
+red_led = LED(1)
 
-# --- CONFIG ---
-# Choose method: 'color' or 'grayscale'
-MODE = 'grayscale'
-
-# Grayscale threshold (for grayscale blobs) or color threshold for color mode
-GRAYSCALE_THRESHOLD = (0, 80)   # tune
-# Example color threshold (L Min, L Max, A Min, A Max, B Min, B Max) — tune if using color:
-COLOR_THRESHOLD = (30, 100, -10, 10, -10, 10)
-
-# Known real-world width of the target (meters) and focal length in pixels
-KNOWN_WIDTH_M = 0.35   # e.g., shoulder width ~35 cm — update to target
-FOCAL_LENGTH_PIX = 300 # calibrate: focal = (pixel_width * known_distance) / known_width
-
-# Minimum blob area to accept (pixels)
-MIN_AREA = 150
-
-# Serial / timing
-baud = 115200
-usb = pyb.USB_VCP()
+# Camera setup
+sensor.reset()
+sensor.set_pixformat(sensor.RGB565)      # Keep RGB
+# Use QVGA to match a 240x240 windowing below (avoid invalid window sizes)
+sensor.set_framesize(sensor.QVGA)       # 320x240
+sensor.set_windowing((240, 240))         # square crop
+sensor.skip_frames(time=2000)
 clock = time.clock()
 
-sensor.reset()
-sensor.set_pixformat(sensor.RGB565)
-sensor.set_framesize(sensor.QVGA) # 320x240
-sensor.skip_frames(200)
-sensor.set_auto_gain(False)
-sensor.set_auto_whitebal(False)
+# Load YOLO LC model from flash
+model = ml.Model("/flash/yolo_lc_192.tflite")
+model_class_labels = ["person"]
+model_class_colors = [(0, 0, 255)]
+print("Model loaded:", model)
+
+# Frame skipping to increase FPS
+frame_skip = 5   # process every (frame_skip+1)th frame
+frame_count = 0
+
+# Distance estimation params (optional, used if we can estimate from bbox width)
+KNOWN_WIDTH_M = 0.35   # meters, update for your target
+FOCAL_LENGTH_PIX = 300 # tune/calibrate for your lens
+
+usb = USB_VCP()
 
 while True:
     clock.tick()
     img = sensor.snapshot()
+    frame_count += 1
 
-    # Choose detection mode
-    if MODE == 'grayscale':
-        blobs = img.find_blobs([GRAYSCALE_THRESHOLD], area_threshold=MIN_AREA, pixels_threshold=MIN_AREA)
-    else:
-        blobs = img.find_blobs([COLOR_THRESHOLD], area_threshold=MIN_AREA, pixels_threshold=MIN_AREA)
+    if frame_count % (frame_skip + 1) == 0:
+        # Run prediction
+        boxes = model.predict([img], callback=yolo_lc_postprocess(threshold=0.4))
 
-    if blobs:
-        # pick largest blob
-        b = max(blobs, key=lambda x: x.pixels())
-        cx = b.cx()
-        cy = b.cy()
-        # estimate width in pixels (use rect or width property)
-        pixel_width = b.w() if b.w() > 0 else b.r()
+        # Choose the best detection (highest score) across all classes, and send a single OBJ line.
+        best = None
+        best_score = 0.0
+        for cls_detections in boxes:
+            for r, score in cls_detections:
+                if score > best_score:
+                    best_score = score
+                    best = (r, score)
 
-        # Simple distance estimate: distance = (known_width * focal_length) / pixel_width
-        if pixel_width > 0:
-            dist_m = (KNOWN_WIDTH_M * FOCAL_LENGTH_PIX) / float(pixel_width)
-        else:
+        if best is not None:
+            r, score = best
+            x, y, w, h = r
+            cx = int(x + (w / 2))
+            cy = int(y + (h / 2))
+
+            # estimate distance from bbox width if possible
             dist_m = -1.0
+            if w > 0:
+                try:
+                    dist_m = (KNOWN_WIDTH_M * FOCAL_LENGTH_PIX) / float(w)
+                except Exception:
+                    dist_m = -1.0
 
-        # Send the observation
-        # Format: OBJ x y d\n
-        msg = "OBJ %d %d %.3f\n" % (cx, cy, dist_m)
-        try:
-            usb.write(msg)
-        except:
-            pass
+            # Draw for debugging
+            img.draw_rectangle(r)
+            img.draw_string(x, max(0, y - 10), "Person", color=(255, 0, 0))
 
-        # optional drawing for debugging
-        img.draw_rectangle(b.rect(), color=(255,0,0))
-        img.draw_cross(cx, cy, color=(0,255,0))
-    else:
-        # No object: optionally notify
-        try:
-            usb.write("OBJ -1 -1 -1\n")
-        except:
-            pass
+            msg = "OBJ %d %d %.3f\n" % (cx, cy, dist_m)
+            try:
+                if usb.isconnected():
+                    # USB_VCP.write prefers bytes; encode for safety
+                    try:
+                        usb.write(msg.encode('utf-8'))
+                    except Exception:
+                        # some firmware versions accept str directly
+                        usb.write(msg)
+                else:
+                    # fallback to REPL print so data is visible in serial
+                    print(msg.strip())
+            except Exception:
+                # swallow write errors to avoid crashing the loop
+                pass
+            red_led.on()
+        else:
+            red_led.off()
+            # send a single "no object" line
+            msg = "OBJ -1 -1 -1\n"
+            try:
+                if usb.isconnected():
+                    try:
+                        usb.write(msg.encode('utf-8'))
+                    except Exception:
+                        usb.write(msg)
+                else:
+                    print(msg.strip())
+            except Exception:
+                pass
+
+    # optional FPS print to console
+    print("FPS:", clock.fps())

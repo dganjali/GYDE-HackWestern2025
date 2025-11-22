@@ -9,8 +9,8 @@ OPENMV_PORT = "/dev/ttyACM0"   # set to your OpenMV serial device
 ARDUINO_PORT = "/dev/ttyUSB0"  # set to your Arduino serial device
 BAUD = 115200
 
-# Camera image width used by OpenMV (QVG A = 320)
-IMG_WIDTH = 320
+# Camera image width used by OpenMV windowing/crop (set to 240 to match OpenMV windowing)
+IMG_WIDTH = 240
 CAM_FOV_DEG = 60.0   # approximate horizontal FOV of camera; tune this
 
 # PID constants for heading (turning)
@@ -29,6 +29,10 @@ FUSION_MAX_DIFF = 0.35  # if abs(US-CAM) < use US; else decide
 # Motor speed limits
 MAX_SPEED = 200  # valid range 0-255 (we use -MAX..MAX for sign)
 BASE_SPEED = 120
+
+# When True the controller will only turn the robot in place (no forward/back motion).
+# Set to False to restore normal distance-based forward/back behavior.
+TURN_ONLY = True
 
 # control loop dt
 DT = 0.1  # 10 Hz
@@ -157,34 +161,43 @@ def control_loop():
         TURN_SCALE = 3.0  # tune (deg -> motor speed)
         diff = int(max(-MAX_SPEED, min(MAX_SPEED, turn_output * TURN_SCALE)))
 
-        # Distance control
+        # Distance control (normally used to compute forward/back speed)
         move_speed = 0
-        if fused is None:
-            move_speed = 0
-        else:
-            if fused > APPROACH_THRESHOLD_M:
-                # target far: approach until TARGET_DIST_M
-                # simple proportional: more error => more forward speed
-                err_dist = fused - TARGET_DIST_M
-                # scale into speed
-                KP_DIST = 180.0
-                move_speed = int(max(0, min(MAX_SPEED, KP_DIST * err_dist)))
-            elif fused > TARGET_DIST_M + DIST_TOLERANCE:
-                # small correction forward
-                err_dist = fused - TARGET_DIST_M
-                KP_DIST = 150.0
-                move_speed = int(max(0, min(MAX_SPEED, KP_DIST * err_dist)))
-            elif fused < TARGET_DIST_M - DIST_TOLERANCE:
-                # too close -> back off
-                err_dist = (TARGET_DIST_M - fused)
-                KP_BACK = 150.0
-                move_speed = -int(max(0, min(MAX_SPEED, KP_BACK * err_dist)))
-            else:
+        if not TURN_ONLY:
+            if fused is None:
                 move_speed = 0
+            else:
+                if fused > APPROACH_THRESHOLD_M:
+                    # target far: approach until TARGET_DIST_M
+                    # simple proportional: more error => more forward speed
+                    err_dist = fused - TARGET_DIST_M
+                    # scale into speed
+                    KP_DIST = 180.0
+                    move_speed = int(max(0, min(MAX_SPEED, KP_DIST * err_dist)))
+                elif fused > TARGET_DIST_M + DIST_TOLERANCE:
+                    # small correction forward
+                    err_dist = fused - TARGET_DIST_M
+                    KP_DIST = 150.0
+                    move_speed = int(max(0, min(MAX_SPEED, KP_DIST * err_dist)))
+                elif fused < TARGET_DIST_M - DIST_TOLERANCE:
+                    # too close -> back off
+                    err_dist = (TARGET_DIST_M - fused)
+                    KP_BACK = 150.0
+                    move_speed = -int(max(0, min(MAX_SPEED, KP_BACK * err_dist)))
+                else:
+                    move_speed = 0
+        else:
+            # TURN_ONLY mode: force zero forward/back motion
+            move_speed = 0
 
         # Combine move_speed and diff into left/right motor commands (tank)
-        left = move_speed - diff
-        right = move_speed + diff
+        if TURN_ONLY:
+            # Turn in place: left and right are opposite to rotate robot
+            left = -diff
+            right = diff
+        else:
+            left = move_speed - diff
+            right = move_speed + diff
 
         # clamp
         left = max(-255, min(255, left))
