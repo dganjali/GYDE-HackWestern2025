@@ -5,8 +5,9 @@
 import threading, time, serial, sys, math
 
 # ---------- CONFIG ----------
-OPENMV_PORT = "/dev/ttyACM0"   # set to your OpenMV serial device
-ARDUINO_PORT = "/dev/ttyUSB0"  # set to your Arduino serial device
+# Device mappings (updated to match your system: OpenMV on /dev/ttyACM1, Nano on /dev/ttyUSB1)
+OPENMV_PORT = "/dev/ttyACM1"   # set to your OpenMV serial device
+ARDUINO_PORT = "/dev/ttyUSB1"  # set to your Arduino serial device
 BAUD = 115200
 
 # Camera image width used by OpenMV windowing/crop (set to 240 to match OpenMV windowing)
