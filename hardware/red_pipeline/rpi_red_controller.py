@@ -25,8 +25,8 @@ IMG_WIDTH = 320  # QVGA width
 CAM_FOV_DEG = 60.0  # Approximate camera horizontal field of view
 
 # PID Controller Gains for turning
-KP = 1.8  # Proportional gain - Lowered to reduce aggressive reaction
-KI = 0.01 # Integral gain - Lowered to prevent overshoot
+KP = 0.8  # Proportional gain - Lowered to reduce aggressive reaction
+KI = 0.00 # Integral gain - Lowered to prevent overshoot
 KD = 8.0  # Derivative gain - Increased to dampen oscillations
 
 # Control Loop Parameters
@@ -163,7 +163,7 @@ def main():
             prev_error = error
 
             # PID output
-            pid_output = (KP * error) + (KI * integral) + (KD * derivative)
+            pid_output = (KP * error) + (KD * derivative)
 
             # --- Motor Command Generation ---
             turn_effort = clamp(pid_output * TURN_SCALING, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED)
