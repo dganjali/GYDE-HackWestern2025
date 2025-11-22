@@ -25,15 +25,15 @@ IMG_WIDTH = 320  # QVGA width
 CAM_FOV_DEG = 60.0  # Approximate camera horizontal field of view
 
 # PID Controller Gains for turning
-KP = 2.8  # Proportional gain - reacts to current error
-KI = 0.05 # Integral gain - corrects for steady-state error
-KD = 5.5  # Derivative gain - dampens oscillations
+KP = 1.8  # Proportional gain - Lowered to reduce aggressive reaction
+KI = 0.01 # Integral gain - Lowered to prevent overshoot
+KD = 8.0  # Derivative gain - Increased to dampen oscillations
 
 # Control Loop Parameters
 LOOP_HZ = 20.0  # Target frequency for the control loop (20 Hz = 50ms per loop)
 DT = 1.0 / LOOP_HZ
 MAX_MOTOR_SPEED = 200  # Max PWM value for motors (0-255)
-TURN_SCALING = 3.0     # Scales PID output to motor speed difference
+TURN_SCALING = 2.5     # Scales PID output to motor speed difference - Lowered for less aggressive turns
 ANGLE_DEADBAND_DEG = 2.5 # Ignore small angle errors to prevent jitter
 INTEGRAL_LIMIT = 150.0   # Prevents integral wind-up
 SLEW_RATE_LIMIT = 800.0  # Max change in motor speed per second to smooth motion
