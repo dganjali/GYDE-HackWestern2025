@@ -33,19 +33,21 @@ BAUD = 115200
 IMG_WIDTH = 240
 CAM_FOV_DEG = 60.0
 # Default PID gains (tweak below or via CLI)
-KP = 1.6
+KP = 2.2
 KI = 0.0
-KD = 0.6
+KD = 1.2
 # control loop interval (s)
-DT = 0.05  # 20 Hz
+DT = 0.03  # ~33 Hz for faster response
 # scale to convert PID output (degrees) -> motor speed
-TURN_SCALE = 2.0
+TURN_SCALE = 3.5
 # clamp for motor command magnitude
-MAX_SPEED = 160
+MAX_SPEED = 220
 # integral anti-windup default
 INTEGRAL_LIMIT = 100.0
 # slew rate default (units per second)
-SLEW_RATE = 300.0
+SLEW_RATE = 800.0
+# derivative filter time constant (s). Small values = less filtering.
+D_FILTER_TAU = 0.02
 
 
 def clamp(v, lo=-255, hi=255):
@@ -137,6 +139,7 @@ def main():
     p.add_argument('--max-speed', type=int, default=MAX_SPEED, help='Max motor speed magnitude')
     p.add_argument('--int-limit', type=float, default=INTEGRAL_LIMIT, help='Integral windup clamp')
     p.add_argument('--slew-rate', type=float, default=SLEW_RATE, help='Max change in motor command per second')
+    p.add_argument('--d-filter-tau', type=float, default=D_FILTER_TAU, help='Derivative low-pass filter time constant (s)')
     args = p.parse_args()
 
     invert_left = args.invert_left
@@ -152,6 +155,10 @@ def main():
     max_speed = args.max_speed
     int_limit = args.int_limit
     slew_rate = args.slew_rate
+    d_filter_tau = args.d_filter_tau
+
+    # print active tuning parameters
+    print(f"PID params: kp={kp} ki={ki} kd={kd} dt={dt} d_tau={d_filter_tau} turn_scale={turn_scale} max_speed={max_speed} slew_rate={slew_rate}")
 
     try:
         openmv_ser = serial.Serial(args.openmv, args.baud, timeout=1)
@@ -222,6 +229,7 @@ def main():
 
     integral = 0.0
     prev_err = 0.0
+    prev_derivative = 0.0
     prev_left = 0
     prev_right = 0
 
@@ -247,11 +255,20 @@ def main():
                 elif integral < -int_limit:
                     integral = -int_limit
 
-                derivative = (err - prev_err) / dt
-                turn_output = kp * err + ki * integral + kd * derivative
+                # derivative (filtered) to reduce noise-driven D spikes
+                derivative_raw = (err - prev_err) / dt
+                alpha = dt / (d_filter_tau + dt) if d_filter_tau > 0.0 else 1.0
+                derivative = alpha * derivative_raw + (1.0 - alpha) * prev_derivative
+                prev_derivative = derivative
                 prev_err = err
 
-                diff = int(max(-max_speed, min(max_speed, turn_output * turn_scale)))
+                turn_output = kp * err + ki * integral + kd * derivative
+
+                # adaptive turn scaling: be more aggressive for large angle errors
+                adaptive_scale = 1.0 + min(abs(err) / 20.0, 2.0)
+                eff_turn_scale = turn_scale * adaptive_scale
+
+                diff = int(max(-max_speed, min(max_speed, turn_output * eff_turn_scale)))
                 # in-place rotation using active_sign
                 left = active_sign * diff
                 right = -active_sign * diff
