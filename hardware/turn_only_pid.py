@@ -69,10 +69,19 @@ class SharedState:
     def __init__(self):
         self.lock = threading.Lock()
         self.cam_x = None
+        self.seq = None
+        self.openmv_ts = None
+        self.recv_ms = None
 
     def set_cam_x(self, x):
         with self.lock:
             self.cam_x = x
+
+    def set_meta(self, seq, ts, recv_ms):
+        with self.lock:
+            self.seq = seq
+            self.openmv_ts = ts
+            self.recv_ms = recv_ms
 
     def get_cam_x(self):
         with self.lock:
@@ -90,16 +99,28 @@ def openmv_reader(ser, state):
         if not line:
             continue
         parts = line.split()
-        if parts and parts[0] == 'OBJ' and len(parts) >= 4:
+        if parts and parts[0] == 'OBJ':
             try:
-                x = int(parts[1])
-                # y = int(parts[2])
-                # d = float(parts[3])
+                if len(parts) >= 6:
+                    seq = int(parts[1])
+                    x = int(parts[2])
+                    # y = int(parts[3])
+                    # d = float(parts[4])
+                    ts = int(parts[5])
+                elif len(parts) >= 4:
+                    seq = None
+                    x = int(parts[1])
+                    ts = None
+                else:
+                    state.set_cam_x(None)
+                    continue
             except Exception:
                 state.set_cam_x(None)
                 continue
             if x >= 0:
                 state.set_cam_x(x)
+                recv_ms = int(time.time() * 1000)
+                state.set_meta(seq, ts, recv_ms)
             else:
                 state.set_cam_x(None)
 
@@ -308,7 +329,16 @@ def main():
             send_cmd(arduino_ser, left, right)
             prev_left = left
             prev_right = right
-            print(f"CAM_X={cam_x} ANGLE={angle} L={left} R={right}")
+            # print latency info if available
+            with state.lock:
+                meta_seq = state.seq
+                meta_ts = state.openmv_ts
+                meta_recv = state.recv_ms
+            if meta_ts is not None and meta_recv is not None:
+                lag = meta_recv - meta_ts
+                print(f"SEQ={meta_seq} LAG={lag}ms CAM_X={cam_x} ANGLE={angle} L={left} R={right}")
+            else:
+                print(f"CAM_X={cam_x} ANGLE={angle} L={left} R={right}")
             time.sleep(dt)
 
     except KeyboardInterrupt:

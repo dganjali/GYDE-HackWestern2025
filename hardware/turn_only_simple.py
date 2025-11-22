@@ -62,10 +62,19 @@ class SharedState:
     def __init__(self):
         self.lock = threading.Lock()
         self.cam_x = None
+        self.seq = None
+        self.openmv_ts = None
+        self.recv_ms = None
 
     def set_cam_x(self, x):
         with self.lock:
             self.cam_x = x
+
+    def set_meta(self, seq, ts, recv_ms):
+        with self.lock:
+            self.seq = seq
+            self.openmv_ts = ts
+            self.recv_ms = recv_ms
 
     def get_cam_x(self):
         with self.lock:
@@ -83,14 +92,30 @@ def openmv_reader(ser, state):
         if not line:
             continue
         parts = line.split()
-        if parts and parts[0] == 'OBJ' and len(parts) >= 4:
+        if parts and parts[0] == 'OBJ':
+            # New format: OBJ <seq> <cx> <cy> <dist> <ts>
             try:
-                x = int(parts[1])
+                if len(parts) >= 6:
+                    seq = int(parts[1])
+                    x = int(parts[2])
+                    # y = int(parts[3])
+                    # d = float(parts[4])
+                    ts = int(parts[5])
+                elif len(parts) >= 4:
+                    # fallback to old format: OBJ cx cy dist
+                    seq = None
+                    x = int(parts[1])
+                    ts = None
+                else:
+                    state.set_cam_x(None)
+                    continue
             except Exception:
                 state.set_cam_x(None)
                 continue
             if x >= 0:
                 state.set_cam_x(x)
+                recv_ms = int(time.time() * 1000)
+                state.set_meta(seq, ts, recv_ms)
             else:
                 state.set_cam_x(None)
 
@@ -196,6 +221,14 @@ def main():
         while True:
             cx = state.get_cam_x()
             angle = angle_from_cam_x(cx)
+            # compute latency if available
+            meta_seq = None
+            meta_ts = None
+            meta_recv = None
+            with state.lock:
+                meta_seq = state.seq
+                meta_ts = state.openmv_ts
+                meta_recv = state.recv_ms
             if angle is None:
                 l = 0
                 r = 0
@@ -216,7 +249,11 @@ def main():
             send_cmd(arduino_ser, l, r)
             prev_l = l
             prev_r = r
-            print(f"CAM_X={cx} ANGLE={angle} L={l} R={r}")
+            if meta_ts is not None and meta_recv is not None:
+                lag = meta_recv - meta_ts
+                print(f"SEQ={meta_seq} LAG={lag}ms CAM_X={cx} ANGLE={angle} L={l} R={r}")
+            else:
+                print(f"CAM_X={cx} ANGLE={angle} L={l} R={r}")
             time.sleep(0.02)
 
     except KeyboardInterrupt:

@@ -2,6 +2,7 @@ import time
 import sensor
 import ml
 from ml.postprocessing import yolo_lc_postprocess
+import pyb
 from pyb import LED, USB_VCP
 
 # Initialize LED
@@ -71,6 +72,9 @@ usb = USB_VCP()
 
 cb = yolo_lc_postprocess(threshold=0.4)
 
+# Sequence counter for messages
+seq = 0
+
 while True:
     clock.tick()
     img = sensor.snapshot()
@@ -108,7 +112,14 @@ while True:
                 img.draw_rectangle(r)
                 img.draw_string(x, max(0, y - 10), "Person", color=(255, 0, 0))
 
-            msg = "OBJ %d %d %.3f\n" % (cx, cy, dist_m)
+            # include sequence and timestamp (ms since boot) to help measure pipeline latency
+            try:
+                ts = pyb.millis()
+            except Exception:
+                # fallback if pyb.millis unavailable
+                ts = int(time.time() * 1000)
+            seq += 1
+            msg = "OBJ %d %d %d %.3f %d\n" % (seq, cx, cy, dist_m, ts)
             try:
                 if usb.isconnected():
                     # USB_VCP.write prefers bytes; encode for safety
@@ -126,8 +137,13 @@ while True:
             red_led.on()
         else:
             red_led.off()
-            # send a single "no object" line
-            msg = "OBJ -1 -1 -1\n"
+            # send a single "no object" line (include seq and ts)
+            try:
+                ts = pyb.millis()
+            except Exception:
+                ts = int(time.time() * 1000)
+            seq += 1
+            msg = "OBJ %d -1 -1 -1 -1 %d\n" % (seq, ts)
             try:
                 if usb.isconnected():
                     try:
