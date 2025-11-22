@@ -37,10 +37,10 @@ IMG_WIDTH = 240
 CAM_FOV_DEG = 60.0
 
 # Tunable constants (defined in-script, not via CLI)
-KP = 0.9
-TURN_SCALE = 2.0
-MAX_SPEED = 180
-DEADZONE = 3.0
+KP = 1.0
+TURN_SCALE = 3.5
+MAX_SPEED = 255
+DEADZONE = 2.0
 AUTOCALIBRATE = False
 INVERT_LEFT = False
 INVERT_RIGHT = False
@@ -217,7 +217,7 @@ def main():
             prev_l = l
             prev_r = r
             print(f"CAM_X={cx} ANGLE={angle} L={l} R={r}")
-            time.sleep(0.03)
+            time.sleep(0.02)
 
     except KeyboardInterrupt:
         print('Stopping: sending STOP')

@@ -57,7 +57,7 @@ print("Model loaded:", model)
 
 # Frame skipping to increase FPS (process every (frame_skip+1)th frame)
 # Lower this to process more frames. Use 0 to process every frame.
-frame_skip = 1
+frame_skip = 0
 frame_count = 0
 
 # Debug toggle: when True, draw boxes and print FPS. Leave False for max speed.
