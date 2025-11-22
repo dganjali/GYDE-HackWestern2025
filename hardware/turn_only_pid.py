@@ -33,15 +33,19 @@ BAUD = 115200
 IMG_WIDTH = 240
 CAM_FOV_DEG = 60.0
 # Default PID gains (tweak below or via CLI)
-KP = 1.3
+KP = 0.9
 KI = 0.0
-KD = 0.12
+KD = 0.25
 # control loop interval (s)
-DT = 0.05  # 20 Hz for faster response
+DT = 0.05  # 20 Hz
 # scale to convert PID output (degrees) -> motor speed
-TURN_SCALE = 4.0
+TURN_SCALE = 2.0
 # clamp for motor command magnitude
-MAX_SPEED = 220
+MAX_SPEED = 160
+# integral anti-windup default
+INTEGRAL_LIMIT = 100.0
+# slew rate default (units per second)
+SLEW_RATE = 300.0
 
 
 def clamp(v, lo=-255, hi=255):
@@ -131,6 +135,8 @@ def main():
     p.add_argument('--turn-scale', type=float, default=TURN_SCALE, help='Scale from PID output to motor differential')
     p.add_argument('--dt', type=float, default=DT, help='Control loop interval in seconds')
     p.add_argument('--max-speed', type=int, default=MAX_SPEED, help='Max motor speed magnitude')
+    p.add_argument('--int-limit', type=float, default=INTEGRAL_LIMIT, help='Integral windup clamp')
+    p.add_argument('--slew-rate', type=float, default=SLEW_RATE, help='Max change in motor command per second')
     args = p.parse_args()
 
     invert_left = args.invert_left
@@ -144,6 +150,8 @@ def main():
     turn_scale = args.turn_scale
     dt = args.dt
     max_speed = args.max_speed
+    int_limit = args.int_limit
+    slew_rate = args.slew_rate
 
     try:
         openmv_ser = serial.Serial(args.openmv, args.baud, timeout=1)
@@ -214,6 +222,8 @@ def main():
 
     integral = 0.0
     prev_err = 0.0
+    prev_left = 0
+    prev_right = 0
 
     print("Starting turn-only PID. Press Ctrl-C to stop.")
     try:
@@ -231,6 +241,12 @@ def main():
                 else:
                     err = -angle
                 integral += err * dt
+                # anti-windup clamp
+                if integral > int_limit:
+                    integral = int_limit
+                elif integral < -int_limit:
+                    integral = -int_limit
+
                 derivative = (err - prev_err) / dt
                 turn_output = kp * err + ki * integral + kd * derivative
                 prev_err = err
@@ -246,9 +262,25 @@ def main():
                 if invert_right:
                     right = -right
 
+            # slew rate limiting to avoid sudden large commands
+            max_step = slew_rate * dt
+            delta_l = left - prev_left
+            if delta_l > max_step:
+                left = int(prev_left + max_step)
+            elif delta_l < -max_step:
+                left = int(prev_left - max_step)
+
+            delta_r = right - prev_right
+            if delta_r > max_step:
+                right = int(prev_right + max_step)
+            elif delta_r < -max_step:
+                right = int(prev_right - max_step)
+
             send_cmd(arduino_ser, left, right)
+            prev_left = left
+            prev_right = right
             print(f"CAM_X={cam_x} ANGLE={angle} L={left} R={right}")
-            time.sleep(DT)
+            time.sleep(dt)
 
     except KeyboardInterrupt:
         print("Stopping: sending STOP")
