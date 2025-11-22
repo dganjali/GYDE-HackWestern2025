@@ -32,7 +32,7 @@ BAUD = 115200
 # Camera and PID config
 IMG_WIDTH = 240
 CAM_FOV_DEG = 60.0
-KP = 0.8
+KP = 1.5
 KI = 0.0
 KD = 0.02
 DT = 0.1
@@ -156,9 +156,9 @@ def main():
                 prev_err = err
 
                 diff = int(max(-MAX_SPEED, min(MAX_SPEED, turn_output * TURN_SCALE)))
-                # in-place rotation
-                left = -diff
-                right = diff
+                # in-place rotation (left/right signs chosen so motors spin opposite directions)
+                left = diff
+                right = -diff
 
             send_cmd(arduino_ser, left, right)
             print(f"CAM_X={cam_x} ANGLE={angle} L={left} R={right}")
