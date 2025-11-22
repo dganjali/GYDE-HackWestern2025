@@ -254,7 +254,7 @@ def main():
                         state["fall_since"] = now
                     elif (not state["fall_alerted"]) and (now - state["fall_since"]) >= FALL_HOLD_S:
                         state["fall_alerted"] = True
-                        print("[ALERT] Fall suspected: red target low in frame for >= {:.0f}s".format(FALL_HOLD_S))
+                        print("[ALERT] Fall suspected: red target low in frame for >= {:.0f}s".format(FALL_HOLD_S), flush=True)
                 else:
                     # Reset when condition not met or target not seen
                     state["fall_since"] = None
@@ -368,6 +368,7 @@ def main():
                 f"Seen:{'Y' if can_move else 'N'} | "
                 f"RawAngle:{get_angle_from_x(cam_x):5.1f}° | Err:{error:5.1f}° | "
                 f"Dist:{(us_dist if us_dist else 0.0):4.2f}m | "
+                f"Y:{(cam_y if cam_y is not None else -1):3d}/{int(IMG_HEIGHT * FALL_Y_FRACTION):3d} | "
                 f"Mode:{'BACKUP' if backup_allowed else 'NORMAL'} | "
                 f"Fwd:{fwd_bwd_speed:4.0f} | Turn:{turn_effort:4.0f} | "
                 f"L/R:{int(left_motor):4d},{int(right_motor):4d}"
