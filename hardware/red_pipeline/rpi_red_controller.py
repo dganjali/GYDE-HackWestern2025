@@ -41,9 +41,15 @@ SLEW_RATE_LIMIT = 800.0  # Max change in motor speed per second to smooth motion
 # Distance Control
 TARGET_DIST_M = 0.5
 DIST_DEADBAND_M = 0.2  # +/- 20cm, so robot stops between 0.3m and 0.7m
-KP_DIST = 50.0        # Proportional gain for distance control (forward when distance > target)
+KP_DIST = 50.0        # Proportional gain for distance control (m/s per meter error)
 BASE_SPEED = 0         # Base speed, we'll use P-control for fwd/bwd
-MIN_DRIVE_SPEED = 40   # Minimum absolute PWM to overcome static friction when moving
+MIN_DRIVE_SPEED = 50   # Minimum absolute PWM to overcome static friction when moving
+
+# Drive polarity and trims
+# If forward/back looks inverted on your robot, flip FORWARD_SIGN to -1 or 1 accordingly.
+FORWARD_SIGN = -1
+MOTOR_LEFT_TRIM = 0      # small constant offset to left motor
+MOTOR_RIGHT_TRIM = -5    # small negative slows right motor slightly
 
 # Vision gating (only move when we see a blob recently)
 DETECTION_TIMEOUT_S = 0.5      # seconds; if no OBJ within this, stop
@@ -210,11 +216,11 @@ def main():
             fwd_bwd_speed = 0
             dist_error = 0
             if can_move and (us_dist is not None):
-                # Positive error => we're too far (move forward)
+                # dist_error > 0 when too far (us_dist > target)
                 dist_error = us_dist - TARGET_DIST_M
                 # Apply deadband
                 if abs(dist_error) > DIST_DEADBAND_M:
-                    fwd_bwd_speed = KP_DIST * dist_error
+                    fwd_bwd_speed = FORWARD_SIGN * KP_DIST * dist_error
                     # Ensure a minimum drive to overcome static friction
                     if abs(fwd_bwd_speed) < MIN_DRIVE_SPEED:
                         fwd_bwd_speed = MIN_DRIVE_SPEED if fwd_bwd_speed > 0 else -MIN_DRIVE_SPEED
@@ -249,9 +255,13 @@ def main():
             # --- Motor Command Generation ---
             turn_effort = clamp(pid_output * TURN_SCALING, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED)
 
-            # Combine forward/backward and turning efforts
-            left_target = fwd_bwd_speed - turn_effort if can_move else 0
-            right_target = fwd_bwd_speed + turn_effort if can_move else 0
+            # Combine forward/backward and turning efforts (apply trims only when moving)
+            if can_move:
+                left_target = (fwd_bwd_speed - turn_effort) + MOTOR_LEFT_TRIM
+                right_target = (fwd_bwd_speed + turn_effort) + MOTOR_RIGHT_TRIM
+            else:
+                left_target = 0
+                right_target = 0
 
 
             # Apply slew rate limiting for smoother acceleration
