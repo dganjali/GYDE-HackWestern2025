@@ -91,7 +91,7 @@ def send_tank(ser, left, right):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--port', '-p', default='/dev/ttyUSB1', help='Arduino serial port')
+    p.add_argument('--port', '-p', default='/dev/ttyUSB0', help='Arduino serial port')
     p.add_argument('--baud', '-b', default=115200, type=int, help='baud rate')
     args = p.parse_args()
 
