@@ -120,11 +120,13 @@ def main():
     p.add_argument('--invert-left', action='store_true', help='Invert left motor sign')
     p.add_argument('--invert-right', action='store_true', help='Invert right motor sign')
     p.add_argument('--deadzone', type=float, default=0.0, help='Degrees deadzone around center to ignore small errors')
+    p.add_argument('--autocalibrate', action='store_true', help='Auto-detect sign pattern using camera feedback')
     args = p.parse_args()
 
     invert_left = args.invert_left
     invert_right = args.invert_right
     deadzone = args.deadzone
+    autocal = args.autocalibrate
 
     try:
         openmv_ser = serial.Serial(args.openmv, args.baud, timeout=1)
@@ -142,6 +144,56 @@ def main():
     state = SharedState()
     t = threading.Thread(target=openmv_reader, args=(openmv_ser, state), daemon=True)
     t.start()
+
+    def measure_rotation_response(test_left, test_right, test_time=0.4, settle=0.1):
+        # wait for a valid cam_x
+        start = time.time()
+        baseline = None
+        while time.time() - start < 5.0:
+            bx = state.get_cam_x()
+            if bx is not None:
+                baseline = bx
+                break
+            time.sleep(0.05)
+        if baseline is None:
+            return 0.0
+
+        # send test command repeatedly for duration
+        end_t = time.time() + test_time
+        while time.time() < end_t:
+            try:
+                send_cmd(arduino_ser, test_left, test_right)
+            except Exception:
+                pass
+            time.sleep(0.05)
+
+        # stop
+        try:
+            arduino_ser.write(b"STOP\n")
+        except Exception:
+            pass
+
+        # wait to settle
+        time.sleep(settle)
+        after = state.get_cam_x()
+        if after is None:
+            return 0.0
+        return abs(after - baseline)
+
+    # active_sign selects which command pattern to use: left = active_sign*diff, right = -active_sign*diff
+    active_sign = 1
+    if autocal:
+        print("Autocalibrating motor sign pattern using camera feedback...")
+        diff_test = 120
+        score_a = measure_rotation_response(diff_test, -diff_test)
+        score_b = measure_rotation_response(-diff_test, diff_test)
+        print(f"Autocal scores: patternA={score_a:.2f}, patternB={score_b:.2f}")
+        if score_b > score_a:
+            active_sign = -1
+            print("Using inverted pattern (left=-diff, right=+diff)")
+        else:
+            active_sign = 1
+            print("Using default pattern (left=+diff, right=-diff)")
 
     integral = 0.0
     prev_err = 0.0
@@ -167,9 +219,9 @@ def main():
                 prev_err = err
 
                 diff = int(max(-MAX_SPEED, min(MAX_SPEED, turn_output * TURN_SCALE)))
-                # in-place rotation (left/right signs chosen so motors spin opposite directions)
-                left = diff
-                right = -diff
+                # in-place rotation using active_sign
+                left = active_sign * diff
+                right = -active_sign * diff
 
                 # allow per-motor inversion if wiring requires it
                 if invert_left:
