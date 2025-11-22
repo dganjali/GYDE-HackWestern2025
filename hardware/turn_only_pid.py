@@ -35,7 +35,7 @@ CAM_FOV_DEG = 60.0
 # Default PID gains (tweak below or via CLI)
 KP = 3.0
 KI = 0.0
-KD = 2.5
+KD = 8.5
 # control loop interval (s)
 DT = 0.03  # ~33 Hz for faster response
 # scale to convert PID output (degrees) -> motor speed
