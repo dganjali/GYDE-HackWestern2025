@@ -21,13 +21,14 @@ ARDUINO_PORT = "/dev/ttyUSB0"  # Serial port for the Arduino Nano
 BAUD_RATE = 115200
 
 # Camera parameters (must match the OpenMV script)
-IMG_WIDTH = 320  # QVGA width
+IMG_WIDTH = 320   # QVGA width
+IMG_HEIGHT = 240  # QVGA height
 CAM_FOV_DEG = 60.0  # Approximate camera horizontal field of view
 
 # PID Controller Gains for turning (TUNING UPDATED)
 KP = 0.9   # Proportional gain - higher for quicker response
 KI = 0.05  # Integral gain - small value to eliminate steady-state error (bias)
-KD = 4.0   # Derivative gain - reduced slightly due to error smoothing
+KD = 5.0   # Derivative gain - slightly higher to reduce oscillation
 
 # Control Loop Parameters
 LOOP_HZ = 20.0  # Target frequency for the control loop (20 Hz = 50ms per loop)
@@ -37,15 +38,15 @@ TURN_SCALING = 1.6     # Reduced scaling since KP is higher
 ANGLE_DEADBAND_DEG = 2.5 # Ignore small angle errors to prevent jitter
 INTEGRAL_LIMIT = 150.0   # Prevents integral wind-up
 SLEW_RATE_LIMIT = 800.0  # Max change in motor speed per second to smooth motion
-ERR_SMOOTH_ALPHA = 0.65  # Increased smoothing for cleaner derivative
+ERR_SMOOTH_ALPHA = 0.70  # Slightly more smoothing for cleaner derivative
 SMALL_ANGLE_PRIORITIZE_FWD_DEG = 8.0  # Below this, attenuate turning to prefer forward motion
 
 # Distance Control
 TARGET_DIST_M = 0.5
 DIST_DEADBAND_M = 0.2  # +/- 20cm, so robot stops between 0.3m and 0.7m
-KP_DIST = 100.0       # Stronger forward when far
+KP_DIST = 120.0       # Slightly stronger forward when far
 BASE_SPEED = 0         # Base speed, we'll use P-control for fwd/bwd
-MIN_DRIVE_SPEED = 60   # Minimum absolute PWM to overcome static friction when moving
+MIN_DRIVE_SPEED = 65   # Minimum absolute PWM to overcome static friction when moving
 
 # Drive polarity and trims
 # If forward/back looks inverted on your robot, flip FORWARD_SIGN to -1 or 1 accordingly.
@@ -59,12 +60,26 @@ DETECTION_TIMEOUT_S = 0.5      # seconds; if no OBJ within this, stop
 # Safety stop: if ultrasonic says we're closer than this, hard stop
 MIN_SAFE_DISTANCE_M = 0.50
 
+# Fall detection (object near bottom of frame for sustained time)
+FALL_Y_FRACTION = 0.75   # bottom 25% of frame (set 0.66 for bottom third)
+FALL_HOLD_S = 10.0       # seconds sustained before alert
+
+# Close-proximity backup behavior
+BACKUP_MODE_ENABLED = True
+BACKUP_DIST_M = 0.25         # trigger backup at/under this distance (m)
+BACKUP_SPEED_PWM = 100       # reverse speed when backing up (PWM)
+BACKUP_HEADING_TOL_DEG = 10  # only back up if heading nearly centered
+BACKUP_TURN_ATTEN = 0.3      # scale down turn while backing up
+
 # Shared state for sensor data (thread-safe)
 state = {
     "cam_x": None,          # Center x-coordinate of the detected blob
+    "cam_y": None,          # Center y-coordinate of the detected blob
     "last_cam_update": 0,   # Timestamp of the last valid camera message
     "us_dist": None,        # Distance from the ultrasonic sensor in meters
     "last_us_update": 0,    # Timestamp of the last ultrasonic update
+    "fall_since": None,     # timestamp when low-y condition started
+    "fall_alerted": False,  # whether alert already printed for current low state
 }
 state_lock = threading.Lock()
 
@@ -96,6 +111,7 @@ def openmv_reader_thread():
                             # "OBJ <seq> <cx> <cy> <area> <ts>"
                             try:
                                 state["cam_x"] = int(parts[2])
+                                state["cam_y"] = int(parts[3])
                                 state["cam_area"] = int(parts[4])
                                 state["last_cam_update"] = time.time()
                             except ValueError:
@@ -103,6 +119,7 @@ def openmv_reader_thread():
                         elif msg_type == "NOOBJ":
                             # No object was seen
                             state["cam_x"] = None
+                            state["cam_y"] = None
                             state["cam_area"] = 0
         except serial.SerialException as e:
             print(f"OpenMV serial error: {e}. Retrying in 5 seconds...")
@@ -205,21 +222,50 @@ def main():
             # Get a thread-safe copy of the state
             with state_lock:
                 cam_x = state["cam_x"]
+                cam_y = state["cam_y"]
                 last_update = state["last_cam_update"]
                 us_dist = state["us_dist"]
+                fall_since = state["fall_since"]
+                fall_alerted = state["fall_alerted"]
 
-            # Vision gating: must see a large-enough blob recently, else STOP
+            # Vision gating: must see a blob recently, else STOP
             seen_recently = (time.time() - last_update) <= DETECTION_TIMEOUT_S
             can_move = (cam_x is not None) and seen_recently
 
-            # Safety stop: ultrasonic too close -> hard stop regardless of vision
-            if us_dist is not None and us_dist > 0 and us_dist < MIN_SAFE_DISTANCE_M:
+            # Determine backup allowance before safety stop
+            angle_center_deg = get_angle_from_x(cam_x) if can_move else None
+            backup_allowed = False
+            if (BACKUP_MODE_ENABLED and can_move and us_dist is not None and us_dist > 0
+                and us_dist <= BACKUP_DIST_M and angle_center_deg is not None
+                and abs(angle_center_deg) <= BACKUP_HEADING_TOL_DEG):
+                backup_allowed = True
+
+            # Safety stop: ultrasonic too close -> hard stop unless backing up allowed
+            if us_dist is not None and us_dist > 0 and us_dist < MIN_SAFE_DISTANCE_M and not backup_allowed:
                 can_move = False
+            
+            # --- Fall detection: low vertical position sustained ---
+            now = time.time()
+            threshold_y = int(IMG_HEIGHT * FALL_Y_FRACTION)
+            with state_lock:
+                if can_move and cam_y is not None and cam_y >= threshold_y:
+                    if state["fall_since"] is None:
+                        state["fall_since"] = now
+                    elif (not state["fall_alerted"]) and (now - state["fall_since"]) >= FALL_HOLD_S:
+                        state["fall_alerted"] = True
+                        print("[ALERT] Fall suspected: red target low in frame for >= {:.0f}s".format(FALL_HOLD_S))
+                else:
+                    # Reset when condition not met or target not seen
+                    state["fall_since"] = None
+                    state["fall_alerted"] = False
             
             # --- Distance Controller (P-controller) ---
             fwd_bwd_speed = 0
             dist_error = 0
-            if can_move and (us_dist is not None):
+            if backup_allowed:
+                # Force reverse to get out of very close proximity
+                fwd_bwd_speed = -FORWARD_SIGN * BACKUP_SPEED_PWM
+            elif can_move and (us_dist is not None):
                 # dist_error > 0 when too far (us_dist > target)
                 dist_error = us_dist - TARGET_DIST_M
                 # Apply deadband
@@ -279,6 +325,10 @@ def main():
                 max_turn_allowed = max(0, MAX_MOTOR_SPEED - abs(fwd_bwd_speed))
                 turn_effort = clamp(turn_effort, -max_turn_allowed, max_turn_allowed)
 
+                # While backing up, reduce turning even more
+                if backup_allowed:
+                    turn_effort *= BACKUP_TURN_ATTEN
+
             # Combine forward/backward and turning efforts (apply trims only when moving)
             # Positive turn_effort should turn RIGHT (target on the right -> positive error)
             # Using differential mix: left = fwd + turn, right = fwd - turn
@@ -317,6 +367,7 @@ def main():
                 f"Seen:{'Y' if can_move else 'N'} | "
                 f"RawAngle:{get_angle_from_x(cam_x):5.1f}° | Err:{error:5.1f}° | "
                 f"Dist:{(us_dist if us_dist else 0.0):4.2f}m | "
+                f"Mode:{'BACKUP' if backup_allowed else 'NORMAL'} | "
                 f"Fwd:{fwd_bwd_speed:4.0f} | Turn:{turn_effort:4.0f} | "
                 f"L/R:{int(left_motor):4d},{int(right_motor):4d}"
             )
