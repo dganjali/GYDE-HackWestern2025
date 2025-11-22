@@ -215,9 +215,11 @@
             <button id="testButton" style="padding: 8px 16px; background: #4caf50; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 14px;">
                 Test Server Connection
             </button>
+            <button id="tts-test" style="margin-left:8px; padding: 8px 12px; background:#2196f3; color:white; border:none; border-radius:6px; cursor:pointer; font-size:14px;">Test Voice</button>
         </div>
         
         <div id="status" class="status idle">Ready to listen</div>
+        <div id="tts-status" class="status idle" style="font-size:12px; margin-top:8px;">TTS idle</div>
         
         <div style="margin-top: 20px; padding: 15px; background: #f5f5f5; border-radius: 10px;">
             <label style="display: block; margin-bottom: 8px; color: #555; font-size: 14px; font-weight: 500;">
@@ -274,6 +276,156 @@
             statusDiv.textContent = text;
             statusDiv.className = `status ${cls}`;
         }
+
+        // TTS state for priming and voice readiness
+        let ttsPrimed = false;
+        let voicesReady = false;
+        let ttsRetryCount = 0;
+
+        // Initialize TTS listeners on load
+        function initTTSListeners() {
+            if (!('speechSynthesis' in window)) {
+                console.warn('[TTS] speechSynthesis not supported');
+                const status = document.getElementById('tts-status');
+                if (status) status.textContent = 'TTS not supported on this device.';
+                return;
+            }
+
+            // If voices already available, mark ready
+            const v = window.speechSynthesis.getVoices();
+            if (v && v.length > 0) {
+                voicesReady = true;
+                log('[TTS] voices ready (initial)');
+            }
+
+            // onvoiceschanged will fire on many mobile browsers when voices populate
+            window.speechSynthesis.onvoiceschanged = () => {
+                voicesReady = true;
+                log('[TTS] voices ready (onvoiceschanged)');
+                const status = document.getElementById('tts-status');
+                if (status) status.textContent = 'TTS voices ready.';
+            };
+        }
+
+        // Prime TTS with a short utterance so mobile allows subsequent playback
+        function primeTTS() {
+            if (ttsPrimed) return;
+            if (!('speechSynthesis' in window)) return;
+            ttsPrimed = true;
+            try {
+                // small silent utterance is sometimes preferable, but speaking a short phrase is more reliable
+                const u = new SpeechSynthesisUtterance('Voice ready');
+                u.lang = 'en-US';
+                u.rate = 1.0;
+                u.pitch = 1.0;
+                u.onend = () => log('[TTS] priming utterance ended');
+                window.speechSynthesis.speak(u);
+                const status = document.getElementById('tts-status');
+                if (status) status.textContent = 'TTS primed';
+                log('[TTS] priming utterance spoken');
+            } catch (e) {
+                console.warn('[TTS] prime failed', e);
+            }
+        }
+
+        // Robust speakText with retries if voices are not yet ready on mobile
+        function speakText(text) {
+            const status = document.getElementById('tts-status');
+            if (status) status.textContent = `TTS called: "${text}"`;
+            log('[TTS] speakText invoked with:', text);
+
+            if (!text) return;
+            if (!('speechSynthesis' in window)) {
+                console.warn('[TTS] speechSynthesis not supported');
+                if (status) status.textContent = 'TTS not supported on this device.';
+                return;
+            }
+
+            // Ensure primed
+            if (!ttsPrimed) {
+                log('[TTS] not primed, priming now');
+                primeTTS();
+            }
+
+            // If voices aren't ready yet, retry a few times with short delays
+            if (!voicesReady) {
+                if (ttsRetryCount < 6) {
+                    ttsRetryCount += 1;
+                    log(`[TTS] voices not ready, retry ${ttsRetryCount}/6`);
+                    if (status) status.textContent = 'Waiting for TTS voices...';
+                    setTimeout(() => speakText(text), 300);
+                    return;
+                } else {
+                    log('[TTS] voices never became ready, proceeding anyway');
+                }
+            }
+
+            try {
+                window.speechSynthesis.cancel();
+
+                const utterance = new SpeechSynthesisUtterance(text);
+                utterance.lang = 'en-US';
+                utterance.rate = 1.0;  // not too fast
+                utterance.pitch = 1.0;
+                utterance.volume = 1.0;
+
+                utterance.onstart = () => {
+                    log('[TTS] onstart');
+                    if (status) status.textContent = 'Speaking...';
+                };
+                utterance.onend = () => {
+                    log('[TTS] onend');
+                    if (status) status.textContent = 'TTS idle';
+                };
+                utterance.onerror = (e) => {
+                    console.warn('[TTS] onerror', e);
+                    if (status) status.textContent = 'TTS error';
+                };
+
+                window.speechSynthesis.speak(utterance);
+            } catch (e) {
+                console.warn('speakText failed', e);
+                if (status) status.textContent = 'TTS failed';
+            }
+        }
+
+    // Schedule a local TTS reminder to speak after `offsetSeconds` seconds.
+    // This runs in the client's browser and does not depend on server push.
+    function scheduleLocalReminder(offsetSeconds, message) {
+        try {
+            const status = document.getElementById('tts-status');
+            if (status) status.textContent = `Scheduled reminder in ${offsetSeconds} seconds: ${message}`;
+
+            // Show a small entry in the results area so user can see it's scheduled
+            if (resultDiv) {
+                const entry = document.createElement('div');
+                entry.className = 'result-item';
+                entry.innerHTML = `<div class="result-label">Scheduled reminder:</div><div class="result-value">In ${offsetSeconds}s — ${message}</div>`;
+                resultDiv.style.display = 'block';
+                resultDiv.className = 'result-box';
+                resultDiv.appendChild(entry);
+            }
+
+            setTimeout(() => {
+                try {
+                    speakText(message);
+                    if (status) status.textContent = 'TTS idle';
+
+                    // Append fired note to results
+                    if (resultDiv) {
+                        const fired = document.createElement('div');
+                        fired.className = 'result-item';
+                        fired.innerHTML = `<div class="result-label">Reminder fired:</div><div class="result-value">${message}</div>`;
+                        resultDiv.appendChild(fired);
+                    }
+                } catch (e) {
+                    console.warn('Local reminder speak failed', e);
+                }
+            }, Math.max(0, Number(offsetSeconds)) * 1000);
+        } catch (e) {
+            console.warn('scheduleLocalReminder failed', e);
+        }
+    }
         
         // Check for speech recognition support
         if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
@@ -508,6 +660,20 @@
                         updateConnectionStatus('Ready to listen', 'idle');
             }
         }
+
+        // Helper: format HH:MM (24h) to spoken 12-hour time like "2:30 PM"
+        function formatTimeForSpeech(timeStr) {
+            if (!timeStr) return '';
+            // Accept formats like "14:30" or "9:00" or "09:00"
+            const m = timeStr.match(/^(\d{1,2}):(\d{2})$/);
+            if (!m) return timeStr;
+            let h = parseInt(m[1], 10);
+            const minute = m[2];
+            const ampm = h >= 12 ? 'PM' : 'AM';
+            let displayHour = h % 12;
+            if (displayHour === 0) displayHour = 12;
+            return `${displayHour}:${minute} ${ampm}`;
+        }
         
         async function sendToServer(text) {
             const userUrl = serverUrlInput.value.trim();
@@ -534,10 +700,57 @@
                 
                 const data = await response.json();
                 log('Response data:', data);
-                
+
                 updateConnectionStatus('Command processed', 'idle');
-                
+
                 displayResult(text, data);
+
+                // Build a spoken response based on server response
+                try {
+                    const res = data.result || {};
+                    const intent = data.intent || {};
+                    let spoken = null;
+
+                    const action = res.action || intent.action || '';
+
+                    if (action === 'CALL_CONTACT') {
+                        const contact = res.contact_key || (intent.slots && intent.slots.contact) || 'contact';
+                        spoken = `Calling your ${contact} now.`;
+                    } else if (action === 'SET_MEDICATION_REMINDER') {
+                        const timeStr = res.time || (intent.slots && intent.slots.time) || null;
+                        const label = res.label || (intent.slots && intent.slots.label) || 'medication';
+                        const fmt = formatTimeForSpeech(timeStr);
+                        spoken = timeStr ? `Okay, I'll remind you at ${fmt} to take your ${label}.` : `Okay, reminder saved for ${label}.`;
+                    } else if (action === 'START_MONITORING') {
+                        spoken = 'Monitoring started. I will keep watching over you.';
+                    } else if (action === 'STOP_MONITORING') {
+                        spoken = 'Monitoring stopped. I will stay nearby but not actively monitoring.';
+                    } else if (res.ok === false && res.error) {
+                        spoken = res.error;
+                    } else if (data.message) {
+                        spoken = data.message;
+                    } else {
+                        // Generic fallback: read details if available, otherwise polite unknown
+                        spoken = 'Okay.';
+                    }
+
+                    if (spoken) speakText(spoken);
+                } catch (e) {
+                    log('Error building spoken response:', e);
+                }
+                // If server created a relative reminder, schedule local TTS
+                try {
+                    // Support multiple response shapes: top-level slots or intent.slots
+                    const slots = data.slots || (data.intent && data.intent.slots) || (data.result && data.result.slots) || {};
+                    const offset = slots && slots.offset_seconds ? Number(slots.offset_seconds) : null;
+                    const task = slots && (slots.task || slots.label || slots.text) ? (slots.task || slots.label || slots.text) : null;
+                    if (offset && !isNaN(offset) && offset > 0) {
+                        const speakMsg = task ? `Reminder: ${task}` : (data.message || 'Reminder');
+                        scheduleLocalReminder(offset, speakMsg);
+                    }
+                } catch (e) {
+                    log('Error scheduling local reminder TTS:', e);
+                }
             } catch (error) {
                 log(`Error sending to server: ${error.message}`);
                 console.error('Error sending to server:', error);
@@ -580,6 +793,16 @@
                     </div>
                 ` : ''}
             `;
+            // If backend provided a human-readable message, speak it; otherwise handled elsewhere
+            if (response && response.message) {
+                speakText(response.message);
+            } else {
+                // Some actions speak in sendToServer; for safety, if result contains error, speak it
+                const res = response.result || {};
+                if (res && res.ok === false && res.error) {
+                    speakText(res.error);
+                }
+            }
         }
         
         function displayError(errorMessage) {
@@ -592,6 +815,8 @@
                     Make sure the server is running and the URL is correct.
                 </div>
             `;
+            // Speak error for accessibility
+            speakText('There was a connection problem. Please try again.');
         }
         
         // Test server connection
@@ -606,12 +831,37 @@
                     const data = await response.json();
                     updateConnectionStatus('✅ Server connected!', 'success');
                     log('Server test successful:', data);
+
+                    // Build and speak a status summary
+                    try {
+                        const monitoring = data.monitoring_state;
+                        const reminders = data.reminders || [];
+                        let spoken = monitoring ? 'Monitoring is ON. ' : 'Monitoring is OFF. ';
+
+                        if (reminders.length === 0) {
+                            spoken += 'You have no reminders.';
+                        } else {
+                            spoken += `You have ${reminders.length} reminder${reminders.length > 1 ? 's' : ''}: `;
+                            const parts = reminders.map(r => {
+                                const t = r.time || r.time_str || '';
+                                const label = r.label || r.text || '';
+                                return t ? `${formatTimeForSpeech(t)} ${label}`.trim() : label;
+                            });
+                            spoken += parts.join(', ');
+                        }
+
+                        speakText(spoken);
+                    } catch (e) {
+                        log('Error building spoken status:', e);
+                    }
                 } else {
                     throw new Error(`Server returned ${response.status}`);
                 }
             } catch (error) {
                 updateConnectionStatus(`❌ Connection failed: ${error.message}`, 'error');
                 log('Server test failed:', error);
+                // Speak the connection problem
+                speakText('There was a connection problem. Please try again.');
             }
         });
         
@@ -662,6 +912,26 @@
             log('Opening WebSocket:', url);
             return new WebSocket(url);
         }
+
+        // DOMContentLoaded: initialize TTS listeners and prime on first user gesture
+        document.addEventListener('DOMContentLoaded', () => {
+            initTTSListeners();
+
+            // Prime on first tap/click anywhere (mobile requires user gesture)
+            document.addEventListener('click', () => {
+                primeTTS();
+            }, { once: true });
+
+            // Wire the TTS test button
+            const ttsTestBtn = document.getElementById('tts-test');
+            if (ttsTestBtn) {
+                ttsTestBtn.addEventListener('click', (e) => {
+                    // This is a user gesture so priming/speech will be allowed
+                    primeTTS();
+                    speakText('This is a test of the voice on your phone.');
+                });
+            }
+        });
     </script>
 </body>
 </html>
