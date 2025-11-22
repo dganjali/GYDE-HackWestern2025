@@ -42,8 +42,9 @@ ERR_SMOOTH_ALPHA = 0.70  # Slightly more smoothing for cleaner derivative
 SMALL_ANGLE_PRIORITIZE_FWD_DEG = 8.0  # Below this, attenuate turning to prefer forward motion
 
 # Distance Control
-TARGET_DIST_M = 0.5
-DIST_DEADBAND_M = 0.2  # +/- 20cm, so robot stops between 0.3m and 0.7m
+# Maintain between 0.40 m (min) and 0.80 m (max) by centering target at 0.60 m with +/- 0.20 m deadband
+TARGET_DIST_M = 0.6
+DIST_DEADBAND_M = 0.2  # deadband -> stop between 0.40 m and 0.80 m
 KP_DIST = 120.0       # Slightly stronger forward when far
 BASE_SPEED = 0         # Base speed, we'll use P-control for fwd/bwd
 MIN_DRIVE_SPEED = 65   # Minimum absolute PWM to overcome static friction when moving
@@ -57,8 +58,8 @@ MOTOR_RIGHT_TRIM = -5    # small negative slows right motor slightly
 # Vision gating (only move when we see a blob recently)
 DETECTION_TIMEOUT_S = 0.5      # seconds; if no OBJ within this, stop
 
-# Safety stop: if ultrasonic says we're closer than this, hard stop
-MIN_SAFE_DISTANCE_M = 0.50
+# Safety stop: if ultrasonic says we're closer than this, hard stop (unless backing up allowed)
+MIN_SAFE_DISTANCE_M = 0.40
 
 # Fall detection (object near bottom of frame for sustained time)
 FALL_Y_FRACTION = 0.75   # bottom 25% of frame (set 0.66 for bottom third)
@@ -66,7 +67,7 @@ FALL_HOLD_S = 10.0       # seconds sustained before alert
 
 # Close-proximity backup behavior
 BACKUP_MODE_ENABLED = True
-BACKUP_DIST_M = 0.25         # trigger backup at/under this distance (m)
+BACKUP_DIST_M = 0.40         # trigger backup at/under this distance (m)
 BACKUP_SPEED_PWM = 100       # reverse speed when backing up (PWM)
 BACKUP_HEADING_TOL_DEG = 10  # only back up if heading nearly centered
 BACKUP_TURN_ATTEN = 0.3      # scale down turn while backing up
