@@ -85,7 +85,8 @@ BACKUP_HEADING_TOL_DEG = 10
 BACKUP_TURN_ATTEN = 0.3      
 
 # External follow control
-FOLLOW_MODE_URL = "http://localhost:8080/mode"  
+# Note: Replace <laptop_ip> with the actual IP address of the machine running follow_mode_server.py
+FOLLOW_MODE_URL = "http://<laptop_ip>:8080/mode"  
 FOLLOW_POLL_INTERVAL_S = 2.0
 FOLLOW_DEFAULT_MODE = "follow"  
 
@@ -393,6 +394,7 @@ def main():
             # 3. Validation Check (Stage 2)
             is_fall_validated = False
             with state_lock:
+                prev_fall_active = state["fall_low_active"]
                 if state["fall_stage_one_active"]:
                     time_elapsed = now - state["fall_trigger_ts"]
                     
@@ -413,7 +415,7 @@ def main():
                             state["fall_stage_one_active"] = False
 
                 if is_fall_validated:
-                    if (not state["fall_low_active"]) or (now - state["fall_last_alert_ts"]) >= FALL_ALERT_PERIOD_S:
+                    if (not prev_fall_active) or (now - state["fall_last_alert_ts"]) >= FALL_ALERT_PERIOD_S:
                         print("ALRT VALIDATED: Multi-Modal Fall Detected!", flush=True)
                         state["fall_last_alert_ts"] = now
                     state["fall_low_active"] = True
