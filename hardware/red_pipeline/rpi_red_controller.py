@@ -29,15 +29,15 @@ IMG_HEIGHT = 240  # QVGA height
 CAM_FOV_DEG = 60.0  # Approximate camera horizontal field of view
 
 # PID Controller Gains for turning (TUNING UPDATED)
-KP = 0.8   # Proportional gain - slightly reduced to avoid overshoot
-KI = 0.03  # Integral gain - reduced to avoid wind-up and oscillation
-KD = 2.5   # Derivative gain - reduced to smooth noisy derivative
+KP = 1.1   # Proportional gain - stronger for faster turning
+KI = 0.03  # Integral gain - small to avoid wind-up and oscillation
+KD = 3.5   # Derivative gain - increased to help damp the stronger KP
 
 # Control Loop Parameters
 LOOP_HZ = 20.0  # Target frequency for the control loop (20 Hz = 50ms per loop)
 DT = 1.0 / LOOP_HZ
 MAX_MOTOR_SPEED = 200  # Max PWM value for motors (0-255)
-TURN_SCALING = 1.2     # Scale turning effort (lower to reduce oscillation)
+TURN_SCALING = 1.8     # Increased scaling to amplify turn output
 ANGLE_DEADBAND_DEG = 2.5 # Ignore small angle errors to prevent jitter
 INTEGRAL_LIMIT = 150.0   # Prevents integral wind-up
 SLEW_RATE_LIMIT = 1400.0  # Max change in motor speed per second to smooth motion (higher -> quicker accel)
@@ -48,9 +48,9 @@ DIST_SMOOTH_ALPHA = 0.7  # Smoothing for effective distance (0..1), higher -> sm
 USE_EFFECTIVE_DIST = True  # allow disabling area-based estimation/hold for debugging
 
 # Distance Control
-# Maintain between 0.40 m (min) and 0.80 m (max) by centering target at 0.60 m with +/- 0.20 m deadband
-TARGET_DIST_M = 0.6
-DIST_DEADBAND_M = 0.2  # deadband -> stop between 0.40 m and 0.80 m
+# Maintain between 0.40 m (min) and 0.60 m (max) by centering target at 0.50 m with +/- 0.10 m deadband
+TARGET_DIST_M = 0.5
+DIST_DEADBAND_M = 0.1  # deadband -> stop between 0.40 m and 0.60 m
 KP_DIST = 180.0       # Stronger forward responsiveness
 BASE_SPEED = 0         # Base speed, we'll use P-control for fwd/bwd
 MIN_DRIVE_SPEED = 90   # Minimum absolute PWM to overcome static friction when moving
