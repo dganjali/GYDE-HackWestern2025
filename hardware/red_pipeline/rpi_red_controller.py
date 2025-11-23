@@ -252,31 +252,51 @@ def main():
             seen_recently = (time.time() - last_update) <= DETECTION_TIMEOUT_S
             with state_lock:
                 follow_mode = state['follow_mode']
-            can_move = (cam_x is not None) and seen_recently and (follow_mode == 'follow')
-
-            angle_center_deg = get_angle_from_x(cam_x) if can_move else None
+            
+            # Check if we should be moving (only respect follow_mode, not detection state)
+            should_move = (follow_mode == 'follow')
+            
+            # Get angle from camera if available, otherwise use last known error (smoothed)
+            angle_center_deg = get_angle_from_x(cam_x) if (cam_x is not None) else None
+            
+            # Calculate detection confidence (decay when detection is lost)
+            if cam_x is not None and seen_recently:
+                detection_confidence = 1.0
+            else:
+                # Gradually decay confidence when detection is lost
+                time_since_detection = time.time() - last_update
+                detection_confidence = max(0.0, 1.0 - (time_since_detection / DETECTION_TIMEOUT_S))
+            
             backup_allowed = False
-            if (BACKUP_MODE_ENABLED and can_move and us_dist is not None and us_dist > 0
+            if (BACKUP_MODE_ENABLED and should_move and us_dist is not None and us_dist > 0
                 and us_dist <= BACKUP_DIST_M and angle_center_deg is not None
-                and abs(angle_center_deg) <= BACKUP_HEADING_TOL_DEG):
+                and abs(angle_center_deg) <= BACKUP_HEADING_TOL_DEG and detection_confidence > 0.5):
                 backup_allowed = True
 
             # --- PID & Motor Control ---
             fwd_bwd_speed = 0
             dist_error = 0
 
-            if backup_allowed and follow_mode == 'follow':
+            if backup_allowed:
                 fwd_bwd_speed = -FORWARD_SIGN * BACKUP_SPEED_PWM
-            elif can_move and (us_dist is not None):
+            elif should_move and (us_dist is not None) and detection_confidence > 0.3:
                 dist_error = us_dist - TARGET_DIST_M
                 if abs(dist_error) > DIST_DEADBAND_M:
                     fwd_bwd_speed = FORWARD_SIGN * KP_DIST * dist_error
                     if abs(fwd_bwd_speed) < MIN_DRIVE_SPEED:
                         fwd_bwd_speed = MIN_DRIVE_SPEED if fwd_bwd_speed > 0 else -MIN_DRIVE_SPEED
+                    # Scale forward speed by detection confidence for smooth decay
+                    fwd_bwd_speed *= detection_confidence
             
             fwd_bwd_speed = clamp(fwd_bwd_speed, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED)
 
-            error_raw = -get_angle_from_x(cam_x) if can_move else 0.0
+            # Use current angle if available, otherwise maintain last filtered error
+            if angle_center_deg is not None:
+                error_raw = -angle_center_deg
+            else:
+                # When no detection, gradually decay the error towards zero
+                error_raw = error_filt * 0.95  # Slow decay
+            
             error_filt = (ERR_SMOOTH_ALPHA * error_filt) + ((1.0 - ERR_SMOOTH_ALPHA) * error_raw)
             error = error_filt
 
@@ -284,8 +304,9 @@ def main():
                 error = 0
                 integral *= 0.9
 
-            if can_move:
-                integral += error * DT
+            # Always update integral when in follow mode, but scale by confidence
+            if should_move:
+                integral += error * DT * detection_confidence
                 integral = clamp(integral, -INTEGRAL_LIMIT, INTEGRAL_LIMIT)
             else:
                 integral = 0.0
@@ -295,8 +316,11 @@ def main():
 
             pid_output = (KP * error) + (KI * integral) + (KD * derivative)
             turn_effort = clamp(pid_output * TURN_SCALING, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED)
+            
+            # Scale turn effort by detection confidence for smooth transitions
+            turn_effort *= detection_confidence
 
-            if can_move:
+            if should_move:
                 ae = abs(error)
                 if ae < SMALL_ANGLE_PRIORITIZE_FWD_DEG:
                     att = ae / SMALL_ANGLE_PRIORITIZE_FWD_DEG
@@ -306,7 +330,7 @@ def main():
                 if backup_allowed:
                     turn_effort *= BACKUP_TURN_ATTEN
 
-            if can_move:
+            if should_move:
                 left_target = (fwd_bwd_speed + turn_effort) + MOTOR_LEFT_TRIM
                 right_target = (fwd_bwd_speed - turn_effort) + MOTOR_RIGHT_TRIM
             else:
@@ -319,10 +343,6 @@ def main():
 
             prev_left_motor = left_motor
             prev_right_motor = right_motor
-
-            if not can_move:
-                left_motor = 0
-                right_motor = 0
             
             # Command the Arduino
             cmd = f"T{int(left_motor)},{int(right_motor)}\n"
