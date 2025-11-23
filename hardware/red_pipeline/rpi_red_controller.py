@@ -51,7 +51,7 @@ ERR_SMOOTH_ALPHA = 0.80  # Reduce centroid smoothing so turning reacts faster
 USE_EFFECTIVE_DIST = True  # allow disabling area-based estimation/hold for debugging
 
 # Mode server (follow/stay) configuration
-MODE_SERVER_URL = "http://172.23.46.159:8080/"
+MODE_SERVER_URL = "http://172.23.46.159:8080/mode"
 MODE_POLL_INTERVAL = 1.0  # seconds
 control_mode = 'follow'  # 'follow' or 'stay'
 
@@ -318,13 +318,27 @@ def mode_poll_thread(url, interval):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "rpi_red_controller/1.0"})
             with urllib.request.urlopen(req, timeout=2) as resp:
-                body = resp.read().decode('utf-8', errors='ignore').lower()
-                if 'stay' in body:
-                    new = 'stay'
-                elif 'follow' in body:
-                    new = 'follow'
-                else:
-                    new = control_mode
+                raw = resp.read()
+                body = raw.decode('utf-8', errors='ignore').strip()
+                new = control_mode
+                # Try JSON first: {"mode":"follow"}
+                try:
+                    import json
+                    j = json.loads(body)
+                    m = None
+                    if isinstance(j, dict):
+                        m = j.get('mode') or j.get('state')
+                    if isinstance(m, str):
+                        m = m.lower()
+                        if m in ('follow', 'stay'):
+                            new = m
+                except Exception:
+                    # fallback to plain-text search
+                    lb = body.lower()
+                    if 'stay' in lb:
+                        new = 'stay'
+                    elif 'follow' in lb:
+                        new = 'follow'
                 if new != control_mode:
                     print(f"Mode change from server: {control_mode} -> {new}")
                     control_mode = new
