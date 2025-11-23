@@ -74,7 +74,8 @@ MOTOR_LEFT_TRIM = 0      # small constant offset to left motor
 MOTOR_RIGHT_TRIM = -5    # small negative slows right motor slightly
 
 # Vision gating (only move when we see a blob recently)
-DETECTION_TIMEOUT_S = 0.5      # seconds; if no OBJ within this, stop
+# Reduced so controller will resume moving more quickly after short camera dropouts
+DETECTION_TIMEOUT_S = 0.2      # seconds; if no OBJ within this, stop
 
 # Safety stop: if ultrasonic says we're closer than this, hard stop (unless backing up allowed)
 MIN_SAFE_DISTANCE_M = 0.40
@@ -149,7 +150,7 @@ def apply_runtime_tuning():
 
     CLI args override environment variables which override file defaults.
     """
-    global KP, KI, KD, KP_DIST, MIN_DRIVE_SPEED, SLEW_RATE_LIMIT, ERR_SMOOTH_ALPHA, TURN_SCALING, FWD_SMOOTH_ALPHA
+    global KP, KI, KD, KP_DIST, MIN_DRIVE_SPEED, SLEW_RATE_LIMIT, ERR_SMOOTH_ALPHA, TURN_SCALING, FWD_SMOOTH_ALPHA, DETECTION_TIMEOUT_S
 
     parser = argparse.ArgumentParser(description="rpi_red_controller tuning options")
     parser.add_argument("--kp", type=float, help="turn proportional gain")
@@ -161,6 +162,7 @@ def apply_runtime_tuning():
     parser.add_argument("--err-alpha", type=float, help="error smoothing alpha (0..1)")
     parser.add_argument("--turn-scale", type=float, help="turn scaling multiplier")
     parser.add_argument("--fwd-alpha", type=float, help="forward smoothing alpha (0..1)")
+    parser.add_argument("--detect-timeout", type=float, help="camera detection timeout in seconds (shorter -> moves sooner)")
     parser.add_argument("--forward-sign", type=int, choices=[-1,1], help="motor forward sign (-1 or 1)")
     parser.add_argument("--disable-est", action='store_true', help="disable area-based distance estimation and hold; use raw ultrasonic only")
     parser.add_argument("--dist-alpha", type=float, help="distance smoothing alpha (0..1)")
@@ -207,6 +209,9 @@ def apply_runtime_tuning():
     v = pick(args.fwd_alpha, 'OPENMV_FWD_ALPHA')
     if v is not None:
         FWD_SMOOTH_ALPHA = v
+    v = pick(args.detect_timeout, 'OPENMV_DETECT_TIMEOUT')
+    if v is not None:
+        DETECTION_TIMEOUT_S = v
     v = pick(args.forward_sign, 'OPENMV_FORWARD_SIGN')
     if v is not None:
         global FORWARD_SIGN
