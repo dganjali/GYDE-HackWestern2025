@@ -1,21 +1,13 @@
 #!/usr/bin/env python3
 """
-rpi_red_controller_web.py
+rpi_red_controller.py
 
 Runs on Raspberry Pi.
 1. Reads "OBJ <seq> <cx> <cy> <area> <ts>" lines from OpenMV.
 2. Runs a PID controller to turn the robot.
 3. Sends "T<left>,<right>" commands to Arduino.
-4. HOSTS A WEB SERVER on Port 8000 to display Fall Alerts.
-
-IMPROVED FALL DETECTION LOGIC (Multi-Modal State-Based):
-Replaces simple Y-coordinate check with two-stage validation:
-1. Stage 1 (Trigger): Detects a sudden, rapid drop in Y or loss of object area.
-2. Stage 2 (Validation): Checks if the resulting state (low or gone) persists
-    for a defined period AND factors in the robot's pre-event speed and distance.
-    
-**FIXED:** Removed the 'fall_low_active' safety stop from the control loop
-to ensure robot follows in follow mode, regardless of fall state.
+4. Polls a web server to determine if it should be in "follow" or "stay" mode.
+5. Hosts a web server on Port 19109 to display fall alerts.
 """
 
 import threading
@@ -402,11 +394,11 @@ def main():
             # 3. Validation Check (Stage 2)
             is_fall_validated = False
             with state_lock:
-                # This must be calculated on every loop, regardless of fall state
-                object_is_gone_or_low = (cam_x is None) or (cam_y is not None and cam_y >= threshold_y)
-                
                 if state["fall_stage_one_active"]:
                     time_elapsed = now - state["fall_trigger_ts"]
+                    
+                    # Condition 1: Check persistence (Is the object still low or gone?)
+                    object_is_gone_or_low = (cam_x is None) or (cam_y is not None and cam_y >= threshold_y)
                     
                     # Condition 2: Check Proximity (Are we seeing the floor/far distance?)
                     # If we have US data, check if distance is far (indicates object is on the floor away from the robot)
@@ -515,7 +507,7 @@ def main():
 
             # Periodic status print for mode
             if int(loop_start_time * 10) % int(2 * 10) == 0: # approx every 2s
-                print(f"[MODE] follow_mode={follow_mode}, Fall_Active={state['fall_low_active']}, Can_Move={can_move}", flush=True)
+                print(f"[MODE] follow_mode={follow_mode}, Can_Move={can_move}", flush=True)
 
     except KeyboardInterrupt:
         print("\nShutdown requested.")
