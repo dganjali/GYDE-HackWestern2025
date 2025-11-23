@@ -32,27 +32,29 @@ IMG_WIDTH = 320
 IMG_HEIGHT = 240  
 CAM_FOV_DEG = 60.0  
 
-# PID Controller Gains
-KP = 0.9   
-KI = 0.05  
+# PID Controller Gains - More aggressive for faster reactions
+KP = 1.5   
+KI = 0.12  
 KD = 5.0   
 
 # Control Loop Parameters
-LOOP_HZ = 20.0  
+LOOP_HZ = 50.0  # Much higher for very responsive control
 DT = 1.0 / LOOP_HZ
-MAX_MOTOR_SPEED = 200  
-TURN_SCALING = 1.6     
-ANGLE_DEADBAND_DEG = 2.5 
-INTEGRAL_LIMIT = 150.0   
-SLEW_RATE_LIMIT = 800.0  
-ERR_SMOOTH_ALPHA = 0.70  
-SMALL_ANGLE_PRIORITIZE_FWD_DEG = 8.0  
+MAX_MOTOR_SPEED = 255  # Use full range
+TURN_SCALING = 2.5     # More aggressive turning
+ANGLE_DEADBAND_DEG = 2.0  # Smaller deadband for faster reactions
+INTEGRAL_LIMIT = 250.0   
+SLEW_RATE_LIMIT = 2000.0  # Much faster slew rate for immediate response
+ERR_SMOOTH_ALPHA = 0.65  # Less smoothing for faster response
+SMALL_ANGLE_PRIORITIZE_FWD_DEG = 12.0  
 
-# Distance Control
-TARGET_DIST_M = 0.6
-DIST_DEADBAND_M = 0.2  
-KP_DIST = 120.0       
-MIN_DRIVE_SPEED = 65   
+# Distance Control - Target range: 0.2m to 0.5m
+TARGET_DIST_M = 0.35  # Middle of target range (0.2-0.5m)
+DIST_MIN_M = 0.2      # Minimum acceptable distance
+DIST_MAX_M = 0.5      # Maximum acceptable distance
+DIST_DEADBAND_M = 0.05  # Very tight deadband for responsive control
+KP_DIST = 250.0       # Much more aggressive distance control
+MIN_DRIVE_SPEED = 120  # Higher minimum to ensure movement   
 
 # Drive polarity and trims
 FORWARD_SIGN = -1
@@ -60,7 +62,7 @@ MOTOR_LEFT_TRIM = 0
 MOTOR_RIGHT_TRIM = -5    
 
 # Vision gating
-DETECTION_TIMEOUT_S = 0.5      
+DETECTION_TIMEOUT_S = 0.3  # Shorter timeout for faster reactions      
 
 # Safety stop removed (previously caused unintended halts)
 
@@ -254,24 +256,36 @@ def main():
             with state_lock:
                 follow_mode = state['follow_mode']
             
-            # Check if we should be moving (only respect follow_mode, not detection state)
+            # Check if we should be moving (only respect follow_mode)
             should_move = (follow_mode == 'follow')
             
-            # Get angle from camera if available, otherwise use last known error (smoothed)
+            # Get angle from camera if available
             angle_center_deg = get_angle_from_x(cam_x) if (cam_x is not None) else None
             
-            # Calculate detection confidence (decay when detection is lost)
-            if cam_x is not None and seen_recently:
-                detection_confidence = 1.0
+            # Determine if we have a valid detection
+            has_detection = (cam_x is not None) and seen_recently
+            
+            # Calculate time since last detection (for graceful shutdown when completely lost)
+            time_since_detection = time.time() - last_update
+            detection_lost = time_since_detection > DETECTION_TIMEOUT_S
+            
+            # Only use confidence for graceful shutdown when detection is completely lost
+            # Don't scale during normal operation - be responsive!
+            # Keep moving aggressively even if detection is briefly lost
+            if detection_lost:
+                # Gradually reduce movement when detection is completely lost, but stay active longer
+                extended_timeout = DETECTION_TIMEOUT_S * 2.0  # Give it more time before stopping
+                if time_since_detection < extended_timeout:
+                    confidence = 0.7  # Still move at 70% when detection lost briefly
+                else:
+                    confidence = max(0.3, 1.0 - ((time_since_detection - extended_timeout) / DETECTION_TIMEOUT_S))
             else:
-                # Gradually decay confidence when detection is lost
-                time_since_detection = time.time() - last_update
-                detection_confidence = max(0.0, 1.0 - (time_since_detection / DETECTION_TIMEOUT_S))
+                confidence = 1.0
             
             backup_allowed = False
             if (BACKUP_MODE_ENABLED and should_move and us_dist is not None and us_dist > 0
                 and us_dist <= BACKUP_DIST_M and angle_center_deg is not None
-                and abs(angle_center_deg) <= BACKUP_HEADING_TOL_DEG and detection_confidence > 0.5):
+                and abs(angle_center_deg) <= BACKUP_HEADING_TOL_DEG and has_detection):
                 backup_allowed = True
 
             # --- PID & Motor Control ---
@@ -280,34 +294,57 @@ def main():
 
             if backup_allowed:
                 fwd_bwd_speed = -FORWARD_SIGN * BACKUP_SPEED_PWM
-            elif should_move and (us_dist is not None) and detection_confidence > 0.3:
-                dist_error = us_dist - TARGET_DIST_M
-                if abs(dist_error) > DIST_DEADBAND_M:
+            elif should_move and (us_dist is not None):
+                # Aggressively maintain distance in target range (0.2m - 0.5m)
+                # Always try to move if outside the acceptable range
+                if us_dist < DIST_MIN_M:
+                    # Too close - back up aggressively
+                    dist_error = us_dist - DIST_MIN_M
+                    fwd_bwd_speed = FORWARD_SIGN * KP_DIST * dist_error * 1.5  # Extra aggressive when too close
+                elif us_dist > DIST_MAX_M:
+                    # Too far - move forward aggressively
+                    dist_error = us_dist - DIST_MAX_M
+                    fwd_bwd_speed = FORWARD_SIGN * KP_DIST * dist_error * 1.5  # Extra aggressive when too far
+                elif abs(us_dist - TARGET_DIST_M) > DIST_DEADBAND_M:
+                    # Within range but not at target - fine-tune position
+                    dist_error = us_dist - TARGET_DIST_M
                     fwd_bwd_speed = FORWARD_SIGN * KP_DIST * dist_error
-                    if abs(fwd_bwd_speed) < MIN_DRIVE_SPEED:
-                        fwd_bwd_speed = MIN_DRIVE_SPEED if fwd_bwd_speed > 0 else -MIN_DRIVE_SPEED
-                    # Scale forward speed by detection confidence for smooth decay
-                    fwd_bwd_speed *= detection_confidence
+                else:
+                    # Within deadband - minimal movement to maintain position
+                    dist_error = us_dist - TARGET_DIST_M
+                    fwd_bwd_speed = FORWARD_SIGN * KP_DIST * dist_error * 0.5  # Reduced but still active
+                
+                # Ensure minimum speed for responsiveness
+                if abs(fwd_bwd_speed) > 0 and abs(fwd_bwd_speed) < MIN_DRIVE_SPEED:
+                    fwd_bwd_speed = MIN_DRIVE_SPEED if fwd_bwd_speed > 0 else -MIN_DRIVE_SPEED
+                
+                # Only scale by confidence if detection is completely lost (but still try to maintain distance)
+                if detection_lost:
+                    fwd_bwd_speed *= max(0.5, confidence)  # Don't stop completely, just slow down
             
             fwd_bwd_speed = clamp(fwd_bwd_speed, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED)
 
-            # Use current angle if available, otherwise maintain last filtered error
+            # Calculate heading error - use current angle if available, otherwise maintain last filtered error
             if angle_center_deg is not None:
                 error_raw = -angle_center_deg
             else:
                 # When no detection, gradually decay the error towards zero
-                error_raw = error_filt * 0.95  # Slow decay
+                error_raw = error_filt * 0.88  # Faster decay for responsiveness
             
+            # Less smoothing for faster response to changes
             error_filt = (ERR_SMOOTH_ALPHA * error_filt) + ((1.0 - ERR_SMOOTH_ALPHA) * error_raw)
             error = error_filt
 
+            # Apply deadband - but keep it small for faster reactions
             if abs(error) < ANGLE_DEADBAND_DEG:
                 error = 0
-                integral *= 0.9
+                integral *= 0.80  # Faster integral decay when on target
 
-            # Always update integral when in follow mode, but scale by confidence
+            # Update integral - always when in follow mode
             if should_move:
-                integral += error * DT * detection_confidence
+                # Only reduce integral update rate when detection is completely lost
+                integral_update_rate = confidence if detection_lost else 1.0
+                integral += error * DT * integral_update_rate
                 integral = clamp(integral, -INTEGRAL_LIMIT, INTEGRAL_LIMIT)
             else:
                 integral = 0.0
@@ -318,16 +355,23 @@ def main():
             pid_output = (KP * error) + (KI * integral) + (KD * derivative)
             turn_effort = clamp(pid_output * TURN_SCALING, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED)
             
-            # Scale turn effort by detection confidence for smooth transitions
-            turn_effort *= detection_confidence
+            # Only scale turn effort when detection is completely lost
+            if detection_lost:
+                turn_effort *= confidence
 
             if should_move:
+                # Slightly reduce turn effort when angle is very small to prioritize forward movement
+                # But still apply significant turn effort for responsiveness
                 ae = abs(error)
                 if ae < SMALL_ANGLE_PRIORITIZE_FWD_DEG:
-                    att = ae / SMALL_ANGLE_PRIORITIZE_FWD_DEG
+                    # Use a less aggressive attenuation - still turn but prioritize forward
+                    att = 0.3 + 0.7 * (ae / SMALL_ANGLE_PRIORITIZE_FWD_DEG)  # Minimum 30% turn effort
                     turn_effort *= att
-                max_turn_allowed = max(0, MAX_MOTOR_SPEED - abs(fwd_bwd_speed))
+                
+                # Limit turn effort based on forward speed, but be generous
+                max_turn_allowed = max(50, MAX_MOTOR_SPEED - abs(fwd_bwd_speed))  # Always allow at least 50 PWM for turning
                 turn_effort = clamp(turn_effort, -max_turn_allowed, max_turn_allowed)
+                
                 if backup_allowed:
                     turn_effort *= BACKUP_TURN_ATTEN
 
@@ -338,6 +382,7 @@ def main():
                 left_target = 0
                 right_target = 0
 
+            # Apply slew rate limiting for smooth transitions
             max_change = SLEW_RATE_LIMIT * DT
             left_motor = clamp(left_target, prev_left_motor - max_change, prev_left_motor + max_change)
             right_motor = clamp(right_target, prev_right_motor - max_change, prev_right_motor + max_change)
