@@ -12,7 +12,10 @@ IMPROVED FALL DETECTION LOGIC (Multi-Modal State-Based):
 Replaces simple Y-coordinate check with two-stage validation:
 1. Stage 1 (Trigger): Detects a sudden, rapid drop in Y or loss of object area.
 2. Stage 2 (Validation): Checks if the resulting state (low or gone) persists
-   for a defined period AND factors in the robot's pre-event speed and distance.
+    for a defined period AND factors in the robot's pre-event speed and distance.
+    
+**FIXED:** Removed the 'fall_low_active' safety stop from the control loop
+to ensure robot follows in follow mode, regardless of fall state.
 """
 
 import threading
@@ -24,37 +27,37 @@ import urllib.request
 import urllib.error
 
 # ---------- CONFIGURATION ----------
-OPENMV_PORT = "/dev/ttyACM0"   
-ARDUINO_PORT = "/dev/ttyUSB0"  
+OPENMV_PORT = "/dev/ttyACM0"    
+ARDUINO_PORT = "/dev/ttyUSB0"   
 BAUD_RATE = 115200
-WEB_PORT = 19109  # Port to access the web page (e.g., http://raspberrypi.local:8000)
+WEB_PORT = 19109 # Port to access the web page (e.g., http://raspberrypi.local:8000)
 
 # Camera parameters
-IMG_WIDTH = 320   
-IMG_HEIGHT = 240  
-CAM_FOV_DEG = 60.0  
+IMG_WIDTH = 320    
+IMG_HEIGHT = 240   
+CAM_FOV_DEG = 60.0   
 
 # PID Controller Gains
-KP = 0.9   
+KP = 0.9    
 KI = 0.05  
-KD = 5.0   
+KD = 5.0    
 
 # Control Loop Parameters
-LOOP_HZ = 20.0  
+LOOP_HZ = 20.0   
 DT = 1.0 / LOOP_HZ
-MAX_MOTOR_SPEED = 200  
-TURN_SCALING = 1.6     
+MAX_MOTOR_SPEED = 200   
+TURN_SCALING = 1.6    
 ANGLE_DEADBAND_DEG = 2.5 
-INTEGRAL_LIMIT = 150.0   
-SLEW_RATE_LIMIT = 800.0  
-ERR_SMOOTH_ALPHA = 0.70  
-SMALL_ANGLE_PRIORITIZE_FWD_DEG = 8.0  
+INTEGRAL_LIMIT = 150.0    
+SLEW_RATE_LIMIT = 800.0   
+ERR_SMOOTH_ALPHA = 0.70   
+SMALL_ANGLE_PRIORITIZE_FWD_DEG = 8.0   
 
 # Distance Control
 TARGET_DIST_M = 0.6
-DIST_DEADBAND_M = 0.2  
-KP_DIST = 120.0       
-MIN_DRIVE_SPEED = 65   
+DIST_DEADBAND_M = 0.2   
+KP_DIST = 120.0          
+MIN_DRIVE_SPEED = 65    
 
 # Drive polarity and trims
 FORWARD_SIGN = -1
@@ -69,44 +72,43 @@ MIN_SAFE_DISTANCE_M = 0.40
 
 # --- IMPROVED FALL DETECTION CONFIGURATION ---
 # NOTE: The old FALL_Y_FRACTION is still used as a secondary persistence check.
-FALL_Y_FRACTION = 0.75          
-FALL_ALERT_PERIOD_S = 1.0       # Time the validated state must persist (Stage 2)
-HISTORY_BUFFER_SIZE = 10        # Number of frames (0.5 seconds at 20 Hz)
+FALL_Y_FRACTION = 0.75           
+FALL_ALERT_PERIOD_S = 1.0        # Time the validated state must persist (Stage 2)
+HISTORY_BUFFER_SIZE = 10         # Number of frames (0.5 seconds at 20 Hz)
 MAX_Y_VELOCITY_PIX_PER_DT = (IMG_HEIGHT * 0.4) * DT # Max allowed Y-change (40% of height per second)
-MIN_AREA_SHRINK_PER_DT = 0.5    # 50% area loss per second, scaled by DT
-FAR_DISTANCE_FALL_M = 1.0       # Ultrasonic distance considered 'far' for a fall victim
+MIN_AREA_SHRINK_PER_DT = 0.5     # 50% area loss per second, scaled by DT
+FAR_DISTANCE_FALL_M = 1.0        # Ultrasonic distance considered 'far' for a fall victim
 # ---------------------------------------------
 
 # Close-proximity backup behavior
 BACKUP_MODE_ENABLED = True
-BACKUP_DIST_M = 0.40         
-BACKUP_SPEED_PWM = 100       
-BACKUP_HEADING_TOL_DEG = 10  
+BACKUP_DIST_M = 0.40           
+BACKUP_SPEED_PWM = 100         
+BACKUP_HEADING_TOL_DEG = 10   
 BACKUP_TURN_ATTEN = 0.3      
 
 # External follow control
-# Note: Replace <laptop_ip> with the actual IP address of the machine running follow_mode_server.py
-FOLLOW_MODE_URL = "http://172.23.46.159:8080/mode"  
+FOLLOW_MODE_URL = "http://localhost:8080/mode"  
 FOLLOW_POLL_INTERVAL_S = 2.0
-FOLLOW_DEFAULT_MODE = "follow"  
+FOLLOW_DEFAULT_MODE = "follow"   
 
 # Shared state for sensor data (thread-safe)
 state = {
-    "cam_x": None,          
-    "cam_y": None,          
-    "cam_area": 0,          # Added cam_area to state to match OBJ message
-    "last_cam_update": 0,   
-    "us_dist": None,        
-    "last_us_update": 0,    
+    "cam_x": None,         
+    "cam_y": None,         
+    "cam_area": 0,         # Added cam_area to state to match OBJ message
+    "last_cam_update": 0,  
+    "us_dist": None,       
+    "last_us_update": 0,   
     "fall_low_active": False,   # Final validated fall state
-    "fall_last_alert_ts": 0.0,  
+    "fall_last_alert_ts": 0.0, 
     "follow_mode": FOLLOW_DEFAULT_MODE,
     
     # --- NEW FALL DETECTION STATE ---
-    "cam_y_history": [],        # History for velocity calculation
-    "cam_area_history": [],     # History for rapid area change
-    "pre_event_speed": 0.0,     # Motor speed when Stage 1 triggered
-    "fall_trigger_ts": 0.0,     # Timestamp of Stage 1 trigger
+    "cam_y_history": [],         # History for velocity calculation
+    "cam_area_history": [],      # History for rapid area change
+    "pre_event_speed": 0.0,      # Motor speed when Stage 1 triggered
+    "fall_trigger_ts": 0.0,      # Timestamp of Stage 1 trigger
     "fall_stage_one_active": False, # Flag for initial detection (rapid drop/loss)
     # --------------------------------
 }
@@ -323,6 +325,8 @@ def main():
             seen_recently = (time.time() - last_update) <= DETECTION_TIMEOUT_S
             with state_lock:
                 follow_mode = state['follow_mode']
+            
+            # can_move starts as true if object is seen and we are in follow mode
             can_move = (cam_x is not None) and seen_recently and (follow_mode == 'follow')
 
             angle_center_deg = get_angle_from_x(cam_x) if can_move else None
@@ -332,8 +336,12 @@ def main():
                 and abs(angle_center_deg) <= BACKUP_HEADING_TOL_DEG):
                 backup_allowed = True
 
+            # CHECK 1: MINIMUM SAFE DISTANCE CHECK (The most likely culprit for stopping)
             if us_dist is not None and us_dist > 0 and us_dist < MIN_SAFE_DISTANCE_M and not backup_allowed:
                 can_move = False
+                # Added debug print to confirm safety stop is the cause
+                print(f"DEBUG: Safety Stop Triggered! us_dist={us_dist:.2f}m < {MIN_SAFE_DISTANCE_M:.2f}m", flush=True)
+
             
             # ----------------------------------------
             # --- IMPROVED FALL DETECTION LOGIC ---
@@ -394,11 +402,9 @@ def main():
             # 3. Validation Check (Stage 2)
             is_fall_validated = False
             with state_lock:
-                prev_fall_active = state["fall_low_active"]
-                
                 # This must be calculated on every loop, regardless of fall state
                 object_is_gone_or_low = (cam_x is None) or (cam_y is not None and cam_y >= threshold_y)
-
+                
                 if state["fall_stage_one_active"]:
                     time_elapsed = now - state["fall_trigger_ts"]
                     
@@ -416,15 +422,15 @@ def main():
                             state["fall_stage_one_active"] = False
 
                 if is_fall_validated:
-                    if (not prev_fall_active) or (now - state["fall_last_alert_ts"]) >= FALL_ALERT_PERIOD_S:
+                    if (not state["fall_low_active"]) or (now - state["fall_last_alert_ts"]) >= FALL_ALERT_PERIOD_S:
                         print("ALRT VALIDATED: Multi-Modal Fall Detected!", flush=True)
-                        state["fall_last_alert_ts"] = now
+                    state["fall_last_alert_ts"] = now
                     state["fall_low_active"] = True
                 else:
                     state["fall_low_active"] = False
                     if not object_is_gone_or_low: 
-                         # If object reappears in a normal position, reset stage one flag
-                         state["fall_stage_one_active"] = False
+                          # If object reappears in a normal position, reset stage one flag
+                          state["fall_stage_one_active"] = False
             
             # --- END IMPROVED FALL DETECTION LOGIC ---
             # -----------------------------------------
@@ -433,9 +439,8 @@ def main():
             fwd_bwd_speed = 0
             dist_error = 0
             
-            # Skip movement if a fall is validated (safety stop)
-            if state["fall_low_active"]:
-                can_move = False
+            # **FIXED: Fall detection safety stop removed here!**
+            # (The block `if state["fall_low_active"]: can_move = False` has been deleted)
 
             if backup_allowed and follow_mode == 'follow':
                 fwd_bwd_speed = -FORWARD_SIGN * BACKUP_SPEED_PWM
@@ -509,8 +514,8 @@ def main():
                 time.sleep(sleep_time)
 
             # Periodic status print for mode
-            if int(loop_start_time * 10) % int(2 * 10) == 0:  # approx every 2s
-                print(f"[MODE] follow_mode={follow_mode}, Fall_Active={state['fall_low_active']}", flush=True)
+            if int(loop_start_time * 10) % int(2 * 10) == 0: # approx every 2s
+                print(f"[MODE] follow_mode={follow_mode}, Fall_Active={state['fall_low_active']}, Can_Move={can_move}", flush=True)
 
     except KeyboardInterrupt:
         print("\nShutdown requested.")
