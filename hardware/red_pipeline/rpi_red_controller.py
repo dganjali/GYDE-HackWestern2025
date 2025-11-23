@@ -38,14 +38,14 @@ KD = 4.0   # Derivative gain - increased to help damp the stronger KP
 # Control Loop Parameters
 LOOP_HZ = 20.0  # Target frequency for the control loop (20 Hz = 50ms per loop)
 DT = 1.0 / LOOP_HZ
-MAX_MOTOR_SPEED = 200  # Max PWM value for motors (0-255)
+MAX_MOTOR_SPEED = 220  # Max PWM value for motors (0-255)
 TURN_SCALING = 2.2     # Increased scaling to amplify turn output
 ANGLE_DEADBAND_DEG = 2.5 # Ignore small angle errors to prevent jitter
 INTEGRAL_LIMIT = 150.0   # Prevents integral wind-up
-SLEW_RATE_LIMIT = 1400.0  # Max change in motor speed per second to smooth motion (higher -> quicker accel)
+SLEW_RATE_LIMIT = 3000.0  # Max change in motor speed per second to smooth motion (higher -> quicker accel)
 ERR_SMOOTH_ALPHA = 0.90  # More smoothing for the centroid/derivative
 SMALL_ANGLE_PRIORITIZE_FWD_DEG = 4.0  # Below this, attenuate turning to prefer forward motion
-FWD_SMOOTH_ALPHA = 0.45  # Smoothing for forward/back speed to reduce oscillation
+FWD_SMOOTH_ALPHA = 0.25  # Smoothing for forward/back speed to reduce oscillation (lower = snappier)
 DIST_SMOOTH_ALPHA = 0.7  # Smoothing for effective distance (0..1), higher -> smoother/slower
 ERR_SMOOTH_ALPHA = 0.80  # Reduce centroid smoothing so turning reacts faster
 USE_EFFECTIVE_DIST = True  # allow disabling area-based estimation/hold for debugging
@@ -57,11 +57,11 @@ control_mode = 'follow'  # 'follow' or 'stay'
 
 # Distance Control
 # Maintain between 0.40 m (min) and 0.60 m (max) by centering target at 0.50 m with +/- 0.10 m deadband
-TARGET_DIST_M = 0.5
+TARGET_DIST_M = 0.45
 DIST_DEADBAND_M = 0.1  # deadband -> stop between 0.40 m and 0.60 m
-KP_DIST = 180.0       # Stronger forward responsiveness
+KP_DIST = 300.0       # Stronger forward responsiveness (increased for faster approach)
 BASE_SPEED = 0         # Base speed, we'll use P-control for fwd/bwd
-MIN_DRIVE_SPEED = 90   # Minimum absolute PWM to overcome static friction when moving
+MIN_DRIVE_SPEED = 120   # Minimum absolute PWM to overcome static friction when moving
 
 # Drive polarity and trims
 # If forward/back looks inverted on your robot, flip FORWARD_SIGN to -1 or 1 accordingly.
