@@ -44,6 +44,7 @@ SLEW_RATE_LIMIT = 1400.0  # Max change in motor speed per second to smooth motio
 ERR_SMOOTH_ALPHA = 0.90  # More smoothing for the centroid/derivative
 SMALL_ANGLE_PRIORITIZE_FWD_DEG = 8.0  # Below this, attenuate turning to prefer forward motion
 FWD_SMOOTH_ALPHA = 0.45  # Smoothing for forward/back speed to reduce oscillation
+DIST_SMOOTH_ALPHA = 0.7  # Smoothing for effective distance (0..1), higher -> smoother/slower
 
 # Distance Control
 # Maintain between 0.40 m (min) and 0.80 m (max) by centering target at 0.60 m with +/- 0.20 m deadband
@@ -75,6 +76,12 @@ BACKUP_DIST_M = 0.40         # trigger backup at/under this distance (m)
 BACKUP_SPEED_PWM = 100       # reverse speed when backing up (PWM)
 BACKUP_HEADING_TOL_DEG = 10  # only back up if heading nearly centered
 BACKUP_TURN_ATTEN = 0.3      # scale down turn while backing up
+
+# Distance estimation and holding behavior
+HOLD_US_WHEN_NO_CAM_S = 1.0   # hold last ultrasonic reading for this many seconds when cam disappears
+AREA_DIST_SAMPLES_MAX = 120   # how many recent (area,dist) pairs to keep for calibration
+MIN_AREA_FOR_EST = 15         # ignore tiny blob areas when building calibration/estimating
+AREA_DIST_K = []              # stores k = area * dist^2 samples for simple inverse-square fit
 
 # Shared state for sensor data (thread-safe)
 state = {
@@ -364,6 +371,7 @@ def main():
     prev_right_motor = 0.0
     error_filt = 0.0
     prev_fwd = 0.0
+    prev_effective_dist = None
 
     try:
         while True:
@@ -378,6 +386,70 @@ def main():
                 fall_since = state["fall_since"]
                 fall_alerted = state["fall_alerted"]
 
+            # --- Distance estimation & holding logic ---
+            dist_source = 'N/A'
+            effective_us_dist = None
+
+            # If we have a recent ultrasonic reading, use it and record timestamp
+            now = time.time()
+            us_age = now - state.get("last_us_update", 0)
+            has_recent_us = (state.get("last_us_update", 0) > 0) and (us_age <= 2.0)
+
+            # If both camera and ultrasonic are available, record calibration sample
+            cam_area = state.get("cam_area", 0)
+            if cam_area and cam_area >= MIN_AREA_FOR_EST and us_dist is not None and us_dist > 0:
+                # compute k = area * dist^2 for inverse-square relation
+                try:
+                    k = float(cam_area) * (float(us_dist) ** 2)
+                    AREA_DIST_K.append(k)
+                    # trim buffer
+                    if len(AREA_DIST_K) > AREA_DIST_SAMPLES_MAX:
+                        AREA_DIST_K.pop(0)
+                except Exception:
+                    pass
+
+            # 1) If ultrasonic recent, use it
+            if us_dist is not None and has_recent_us:
+                effective_us_dist = us_dist
+                dist_source = 'US'
+            else:
+                # 2) If camera sees blob and we have calibration, estimate from area
+                if cam_area and cam_area >= MIN_AREA_FOR_EST and AREA_DIST_K:
+                    # use median k for robustness
+                    try:
+                        sorted_k = sorted(AREA_DIST_K)
+                        mid = len(sorted_k) // 2
+                        if len(sorted_k) % 2 == 1:
+                            k_med = sorted_k[mid]
+                        else:
+                            k_med = 0.5 * (sorted_k[mid - 1] + sorted_k[mid])
+                        est = (k_med / float(cam_area)) ** 0.5
+                        # sanity clamp
+                        if 0.02 < est < 5.0:
+                            effective_us_dist = est
+                            dist_source = 'EST'
+                    except Exception:
+                        effective_us_dist = None
+                # 3) Otherwise, if camera lost sight but we have very recent ultrasonic, hold it
+                if effective_us_dist is None and state.get("last_us_update", 0) > 0:
+                    if (now - state.get("last_us_update", 0)) <= HOLD_US_WHEN_NO_CAM_S:
+                        effective_us_dist = state.get("us_dist")
+                        dist_source = 'HOLD'
+
+            # Fallback: zero or None
+            if effective_us_dist is None:
+                effective_us_dist = None
+                dist_source = 'N/A'
+
+            # Apply exponential smoothing to the effective distance to reduce choppy changes
+            if effective_us_dist is not None:
+                if prev_effective_dist is None:
+                    prev_effective_dist = effective_us_dist
+                else:
+                    # higher DIST_SMOOTH_ALPHA -> smoother (slower) response
+                    effective_us_dist = (DIST_SMOOTH_ALPHA * prev_effective_dist) + ((1.0 - DIST_SMOOTH_ALPHA) * effective_us_dist)
+                    prev_effective_dist = effective_us_dist
+
             # Vision gating: must see a blob recently, else STOP
             seen_recently = (time.time() - last_update) <= DETECTION_TIMEOUT_S
             can_move = (cam_x is not None) and seen_recently
@@ -385,13 +457,19 @@ def main():
             # Determine backup allowance before safety stop
             angle_center_deg = get_angle_from_x(cam_x) if can_move else None
             backup_allowed = False
-            if (BACKUP_MODE_ENABLED and can_move and us_dist is not None and us_dist > 0
-                and us_dist <= BACKUP_DIST_M and angle_center_deg is not None
+            # Use effective_us_dist (est/hold/US) when deciding backup allowance
+            try:
+                usd = effective_us_dist
+            except NameError:
+                usd = us_dist
+
+            if (BACKUP_MODE_ENABLED and can_move and usd is not None and usd > 0
+                and usd <= BACKUP_DIST_M and angle_center_deg is not None
                 and abs(angle_center_deg) <= BACKUP_HEADING_TOL_DEG):
                 backup_allowed = True
 
-            # Safety stop: ultrasonic too close -> hard stop unless backing up allowed
-            if us_dist is not None and us_dist > 0 and us_dist < MIN_SAFE_DISTANCE_M and not backup_allowed:
+            # Safety stop: ultrasonic (effective) too close -> hard stop unless backing up allowed
+            if usd is not None and usd > 0 and usd < MIN_SAFE_DISTANCE_M and not backup_allowed:
                 can_move = False
             
             # --- Fall detection: low vertical position sustained ---
@@ -417,7 +495,13 @@ def main():
                 fwd_bwd_speed = -FORWARD_SIGN * BACKUP_SPEED_PWM
             elif can_move and (us_dist is not None):
                 # dist_error > 0 when too far (us_dist > target)
-                dist_error = us_dist - TARGET_DIST_M
+                # Use effective_us_dist (est/hold/US) as the distance reading for the distance controller
+                if effective_us_dist is not None:
+                    dist_reading = effective_us_dist
+                else:
+                    dist_reading = us_dist
+
+                dist_error = dist_reading - TARGET_DIST_M
                 # Apply deadband
                 if abs(dist_error) > DIST_DEADBAND_M:
                     fwd_bwd_speed = FORWARD_SIGN * KP_DIST * dist_error
@@ -521,7 +605,7 @@ def main():
             print(
                 f"Seen:{'Y' if can_move else 'N'} | "
                 f"RawAngle:{get_angle_from_x(cam_x):5.1f}° | Err:{error:5.1f}° | "
-                f"Dist:{(us_dist if us_dist else 0.0):4.2f}m | "
+                f"Dist:{(effective_us_dist if effective_us_dist else 0.0):4.2f}m({dist_source}) | "
                 f"Mode:{'BACKUP' if backup_allowed else 'NORMAL'} | "
                 f"Fwd:{fwd_bwd_speed:4.0f} | Turn:{turn_effort:4.0f} | "
                 f"L/R:{int(left_motor):4d},{int(right_motor):4d}"
