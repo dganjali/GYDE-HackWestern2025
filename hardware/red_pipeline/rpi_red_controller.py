@@ -14,6 +14,8 @@ import time
 import serial
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import urllib.request
+import urllib.error
 
 # ---------- CONFIGURATION ----------
 OPENMV_PORT = "/dev/ttyACM0"   
@@ -70,6 +72,11 @@ BACKUP_SPEED_PWM = 100
 BACKUP_HEADING_TOL_DEG = 10  
 BACKUP_TURN_ATTEN = 0.3      
 
+# External follow control (poll remote server returning plain text containing 'follow' or 'stay')
+FOLLOW_MODE_URL = "http://localhost:8080/mode"  # Replace with actual controller URL
+FOLLOW_POLL_INTERVAL_S = 2.0
+FOLLOW_DEFAULT_MODE = "follow"  # Fallback mode if server unreachable
+
 # Shared state for sensor data (thread-safe)
 state = {
     "cam_x": None,          
@@ -79,6 +86,7 @@ state = {
     "last_us_update": 0,    
     "fall_low_active": False,   # whether currently low
     "fall_last_alert_ts": 0.0,  # last time we printed an alert
+    "follow_mode": FOLLOW_DEFAULT_MODE,  # 'follow' or 'stay'
 }
 state_lock = threading.Lock()
 
@@ -183,6 +191,26 @@ def openmv_reader_thread():
         except Exception:
             time.sleep(1)
 
+def follow_mode_poll_thread():
+    """Background thread to poll remote server for follow/stay mode."""
+    print(f"Follow mode polling thread started (interval={FOLLOW_POLL_INTERVAL_S}s, url={FOLLOW_MODE_URL})")
+    while True:
+        new_mode = None
+        try:
+            with urllib.request.urlopen(FOLLOW_MODE_URL, timeout=2) as resp:
+                txt = resp.read().decode('utf-8', errors='ignore').strip().lower()
+                if 'follow' in txt:
+                    new_mode = 'follow'
+                elif 'stay' in txt:
+                    new_mode = 'stay'
+        except Exception:
+            # Network or parse error; keep previous mode
+            pass
+        if new_mode:
+            with state_lock:
+                state['follow_mode'] = new_mode
+        time.sleep(FOLLOW_POLL_INTERVAL_S)
+
 def arduino_reader_thread(arduino_ser):
     global state
     print("Starting Arduino reader thread...")
@@ -226,6 +254,10 @@ def main():
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
 
+    # 3. Start follow mode polling thread
+    follow_thread = threading.Thread(target=follow_mode_poll_thread, daemon=True)
+    follow_thread.start()
+
     print("Waiting for first message from OpenMV...")
     while True:
         with state_lock:
@@ -240,7 +272,7 @@ def main():
         print(f"Fatal: Could not open Arduino port {ARDUINO_PORT}: {e}")
         sys.exit(1)
 
-    # 3. Start Arduino Thread
+    # 4. Start Arduino Thread
     arduino_reader = threading.Thread(target=arduino_reader_thread, args=(arduino,), daemon=True)
     arduino_reader.start()
 
@@ -261,7 +293,9 @@ def main():
                 us_dist = state["us_dist"]
 
             seen_recently = (time.time() - last_update) <= DETECTION_TIMEOUT_S
-            can_move = (cam_x is not None) and seen_recently
+            with state_lock:
+                follow_mode = state['follow_mode']
+            can_move = (cam_x is not None) and seen_recently and (follow_mode == 'follow')
 
             angle_center_deg = get_angle_from_x(cam_x) if can_move else None
             backup_allowed = False
@@ -291,7 +325,7 @@ def main():
             # --- PID & Motor Control (Simplified for brevity, logic remains same) ---
             fwd_bwd_speed = 0
             dist_error = 0
-            if backup_allowed:
+            if backup_allowed and follow_mode == 'follow':
                 fwd_bwd_speed = -FORWARD_SIGN * BACKUP_SPEED_PWM
             elif can_move and (us_dist is not None):
                 dist_error = us_dist - TARGET_DIST_M
@@ -359,6 +393,10 @@ def main():
             sleep_time = DT - elapsed_time
             if sleep_time > 0:
                 time.sleep(sleep_time)
+
+            # Periodic status print for mode
+            if int(loop_start_time * 10) % int(2 * 10) == 0:  # approx every 2s
+                print(f"[MODE] follow_mode={follow_mode}")
 
     except KeyboardInterrupt:
         print("\nShutdown requested.")
