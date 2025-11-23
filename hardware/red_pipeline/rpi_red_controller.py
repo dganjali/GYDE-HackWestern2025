@@ -16,6 +16,7 @@ import serial
 import sys
 import os
 import glob
+import argparse
 
 # ---------- CONFIGURATION ----------
 OPENMV_PORT = "/dev/ttyACM1"   # Serial port for the OpenMV camera
@@ -28,28 +29,29 @@ IMG_HEIGHT = 240  # QVGA height
 CAM_FOV_DEG = 60.0  # Approximate camera horizontal field of view
 
 # PID Controller Gains for turning (TUNING UPDATED)
-KP = 0.9   # Proportional gain - higher for quicker response
-KI = 0.05  # Integral gain - small value to eliminate steady-state error (bias)
-KD = 5.0   # Derivative gain - slightly higher to reduce oscillation
+KP = 0.8   # Proportional gain - slightly reduced to avoid overshoot
+KI = 0.03  # Integral gain - reduced to avoid wind-up and oscillation
+KD = 2.5   # Derivative gain - reduced to smooth noisy derivative
 
 # Control Loop Parameters
 LOOP_HZ = 20.0  # Target frequency for the control loop (20 Hz = 50ms per loop)
 DT = 1.0 / LOOP_HZ
 MAX_MOTOR_SPEED = 200  # Max PWM value for motors (0-255)
-TURN_SCALING = 1.6     # Reduced scaling since KP is higher
+TURN_SCALING = 1.2     # Scale turning effort (lower to reduce oscillation)
 ANGLE_DEADBAND_DEG = 2.5 # Ignore small angle errors to prevent jitter
 INTEGRAL_LIMIT = 150.0   # Prevents integral wind-up
-SLEW_RATE_LIMIT = 800.0  # Max change in motor speed per second to smooth motion
-ERR_SMOOTH_ALPHA = 0.70  # Slightly more smoothing for cleaner derivative
+SLEW_RATE_LIMIT = 1400.0  # Max change in motor speed per second to smooth motion (higher -> quicker accel)
+ERR_SMOOTH_ALPHA = 0.90  # More smoothing for the centroid/derivative
 SMALL_ANGLE_PRIORITIZE_FWD_DEG = 8.0  # Below this, attenuate turning to prefer forward motion
+FWD_SMOOTH_ALPHA = 0.45  # Smoothing for forward/back speed to reduce oscillation
 
 # Distance Control
 # Maintain between 0.40 m (min) and 0.80 m (max) by centering target at 0.60 m with +/- 0.20 m deadband
 TARGET_DIST_M = 0.6
 DIST_DEADBAND_M = 0.2  # deadband -> stop between 0.40 m and 0.80 m
-KP_DIST = 120.0       # Slightly stronger forward when far
+KP_DIST = 180.0       # Stronger forward responsiveness
 BASE_SPEED = 0         # Base speed, we'll use P-control for fwd/bwd
-MIN_DRIVE_SPEED = 65   # Minimum absolute PWM to overcome static friction when moving
+MIN_DRIVE_SPEED = 90   # Minimum absolute PWM to overcome static friction when moving
 
 # Drive polarity and trims
 # If forward/back looks inverted on your robot, flip FORWARD_SIGN to -1 or 1 accordingly.
@@ -121,6 +123,66 @@ def autodetect_openmv_port():
     except Exception:
         pass
     return candidates[0]
+
+def apply_runtime_tuning():
+    """Allow runtime tuning via CLI args or environment variables.
+
+    CLI args override environment variables which override file defaults.
+    """
+    global KP, KI, KD, KP_DIST, MIN_DRIVE_SPEED, SLEW_RATE_LIMIT, ERR_SMOOTH_ALPHA, TURN_SCALING, FWD_SMOOTH_ALPHA
+
+    parser = argparse.ArgumentParser(description="rpi_red_controller tuning options")
+    parser.add_argument("--kp", type=float, help="turn proportional gain")
+    parser.add_argument("--ki", type=float, help="turn integral gain")
+    parser.add_argument("--kd", type=float, help="turn derivative gain")
+    parser.add_argument("--kp-dist", type=float, help="distance proportional gain")
+    parser.add_argument("--min-drive", type=float, help="minimum drive PWM")
+    parser.add_argument("--slew", type=float, help="slew rate limit (PWM/sec)")
+    parser.add_argument("--err-alpha", type=float, help="error smoothing alpha (0..1)")
+    parser.add_argument("--turn-scale", type=float, help="turn scaling multiplier")
+    parser.add_argument("--fwd-alpha", type=float, help="forward smoothing alpha (0..1)")
+    args, _ = parser.parse_known_args()
+
+    # Helper to pick arg -> env -> default
+    def pick(arg_val, env_name):
+        if arg_val is not None:
+            return arg_val
+        ev = os.environ.get(env_name)
+        if ev is not None:
+            try:
+                return float(ev)
+            except Exception:
+                pass
+        return None
+
+    v = pick(args.kp, 'OPENMV_KP')
+    if v is not None:
+        KP = v
+    v = pick(args.ki, 'OPENMV_KI')
+    if v is not None:
+        KI = v
+    v = pick(args.kd, 'OPENMV_KD')
+    if v is not None:
+        KD = v
+    v = pick(args.kp_dist, 'OPENMV_KP_DIST')
+    if v is not None:
+        KP_DIST = v
+    v = pick(args.min_drive, 'OPENMV_MIN_DRIVE')
+    if v is not None:
+        MIN_DRIVE_SPEED = v
+    v = pick(args.slew, 'OPENMV_SLEW')
+    if v is not None:
+        SLEW_RATE_LIMIT = v
+    v = pick(args.err_alpha, 'OPENMV_ERR_ALPHA')
+    if v is not None:
+        ERR_SMOOTH_ALPHA = v
+    v = pick(args.turn_scale, 'OPENMV_TURN_SCALE')
+    if v is not None:
+        TURN_SCALING = v
+    v = pick(args.fwd_alpha, 'OPENMV_FWD_ALPHA')
+    if v is not None:
+        FWD_SMOOTH_ALPHA = v
+
 
 # ---------- SERIAL PORT READER THREAD ----------
 
@@ -232,6 +294,13 @@ def main():
     """
     Main function to run the PID control loop.
     """
+    # Apply any runtime tuning from CLI or environment before starting
+    apply_runtime_tuning()
+
+    print("Tuning parameters:")
+    print(f"  KP={KP} KI={KI} KD={KD} | KP_DIST={KP_DIST} MIN_DRIVE={MIN_DRIVE_SPEED}")
+    print(f"  TURN_SCALE={TURN_SCALING} ERR_ALPHA={ERR_SMOOTH_ALPHA} FWD_ALPHA={FWD_SMOOTH_ALPHA} SLEW={SLEW_RATE_LIMIT}")
+
     # Start the OpenMV reader thread
     reader = threading.Thread(target=openmv_reader_thread, daemon=True)
     reader.start()
@@ -263,6 +332,7 @@ def main():
     prev_left_motor = 0.0
     prev_right_motor = 0.0
     error_filt = 0.0
+    prev_fwd = 0.0
 
     try:
         while True:
@@ -326,6 +396,9 @@ def main():
             
             # Clamp forward/backward speed
             fwd_bwd_speed = clamp(fwd_bwd_speed, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED)
+            # Smooth forward/back to reduce oscillation
+            fwd_bwd_speed = (FWD_SMOOTH_ALPHA * prev_fwd) + ((1.0 - FWD_SMOOTH_ALPHA) * fwd_bwd_speed)
+            prev_fwd = fwd_bwd_speed
 
             # --- PID Calculation (Turning) ---
             # Convention: angle > 0 when target is to the RIGHT of center.
@@ -352,8 +425,10 @@ def main():
             else:
                 integral = 0.0
 
-            # Derivative term
+            # Derivative term (with clamping to avoid spikes)
             derivative = (error - prev_error) / DT
+            # Clamp derivative to a reasonable range to avoid huge corrective kicks from noise
+            derivative = clamp(derivative, -50.0, 50.0)
             prev_error = error
 
             # PID output
