@@ -116,9 +116,13 @@ def openmv_reader_thread():
                             state["cam_x"] = None
                             state["cam_y"] = None
                             state["cam_area"] = 0
-        except serial.SerialException:
+                            # Mark that we've received a camera heartbeat
+                            state["last_cam_update"] = time.time()
+        except serial.SerialException as e:
+            print(f"WARN: Failed to open/read OpenMV port {OPENMV_PORT}: {e}. Retrying in 5s...")
             time.sleep(5)
-        except Exception:
+        except Exception as e:
+            print(f"WARN: OpenMV reader thread error: {e}. Retrying in 1s...")
             time.sleep(1)
 
 def follow_mode_poll_thread():
