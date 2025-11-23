@@ -74,7 +74,7 @@ BACKUP_HEADING_TOL_DEG = 10
 BACKUP_TURN_ATTEN = 0.3      
 
 # External follow control
-FOLLOW_MODE_URL = "http://localhost:8080/mode"  
+FOLLOW_MODE_URL = "http://172.23.46.159:8080/mode"  
 FOLLOW_POLL_INTERVAL_S = 2.0
 FOLLOW_DEFAULT_MODE = "follow"  
 
