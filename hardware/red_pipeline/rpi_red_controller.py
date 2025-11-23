@@ -7,6 +7,12 @@ Runs on Raspberry Pi.
 2. Runs a PID controller to turn the robot.
 3. Sends "T<left>,<right>" commands to Arduino.
 4. HOSTS A WEB SERVER on Port 8000 to display Fall Alerts.
+
+IMPROVED FALL DETECTION LOGIC (Multi-Modal State-Based):
+Replaces simple Y-coordinate check with two-stage validation:
+1. Stage 1 (Trigger): Detects a sudden, rapid drop in Y or loss of object area.
+2. Stage 2 (Validation): Checks if the resulting state (low or gone) persists
+   for a defined period AND factors in the robot's pre-event speed and distance.
 """
 
 import threading
@@ -61,9 +67,15 @@ DETECTION_TIMEOUT_S = 0.5
 # Safety stop
 MIN_SAFE_DISTANCE_M = 0.40
 
-# Fall detection
-FALL_Y_FRACTION = 0.75     
-FALL_ALERT_PERIOD_S = 1.0  
+# --- IMPROVED FALL DETECTION CONFIGURATION ---
+# NOTE: The old FALL_Y_FRACTION is still used as a secondary persistence check.
+FALL_Y_FRACTION = 0.75          
+FALL_ALERT_PERIOD_S = 1.0       # Time the validated state must persist (Stage 2)
+HISTORY_BUFFER_SIZE = 10        # Number of frames (0.5 seconds at 20 Hz)
+MAX_Y_VELOCITY_PIX_PER_DT = (IMG_HEIGHT * 0.4) * DT # Max allowed Y-change (40% of height per second)
+MIN_AREA_SHRINK_PER_DT = 0.5    # 50% area loss per second, scaled by DT
+FAR_DISTANCE_FALL_M = 1.0       # Ultrasonic distance considered 'far' for a fall victim
+# ---------------------------------------------
 
 # Close-proximity backup behavior
 BACKUP_MODE_ENABLED = True
@@ -72,21 +84,30 @@ BACKUP_SPEED_PWM = 100
 BACKUP_HEADING_TOL_DEG = 10  
 BACKUP_TURN_ATTEN = 0.3      
 
-# External follow control (poll remote server returning plain text containing 'follow' or 'stay')
-FOLLOW_MODE_URL = "http://localhost:8080/mode"  # Replace with actual controller URL
+# External follow control
+FOLLOW_MODE_URL = "http://localhost:8080/mode"  
 FOLLOW_POLL_INTERVAL_S = 2.0
-FOLLOW_DEFAULT_MODE = "follow"  # Fallback mode if server unreachable
+FOLLOW_DEFAULT_MODE = "follow"  
 
 # Shared state for sensor data (thread-safe)
 state = {
     "cam_x": None,          
     "cam_y": None,          
+    "cam_area": 0,          # Added cam_area to state to match OBJ message
     "last_cam_update": 0,   
     "us_dist": None,        
     "last_us_update": 0,    
-    "fall_low_active": False,   # whether currently low
-    "fall_last_alert_ts": 0.0,  # last time we printed an alert
-    "follow_mode": FOLLOW_DEFAULT_MODE,  # 'follow' or 'stay'
+    "fall_low_active": False,   # Final validated fall state
+    "fall_last_alert_ts": 0.0,  
+    "follow_mode": FOLLOW_DEFAULT_MODE,
+    
+    # --- NEW FALL DETECTION STATE ---
+    "cam_y_history": [],        # History for velocity calculation
+    "cam_area_history": [],     # History for rapid area change
+    "pre_event_speed": 0.0,     # Motor speed when Stage 1 triggered
+    "fall_trigger_ts": 0.0,     # Timestamp of Stage 1 trigger
+    "fall_stage_one_active": False, # Flag for initial detection (rapid drop/loss)
+    # --------------------------------
 }
 state_lock = threading.Lock()
 
@@ -97,7 +118,6 @@ class StatusHandler(BaseHTTPRequestHandler):
     A simple handler to serve a webpage showing the fall status.
     """
     def do_GET(self):
-        # Only respond to root path
         if self.path == '/':
             self.send_response(200)
             self.send_header('Content-type', 'text/html')
@@ -107,7 +127,6 @@ class StatusHandler(BaseHTTPRequestHandler):
             with state_lock:
                 fall_active = state["fall_low_active"]
                 last_alert = state["fall_last_alert_ts"]
-                last_cam = state["last_cam_update"]
 
             # Calculate time strings
             time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(last_alert)) if last_alert > 0 else "None"
@@ -285,12 +304,20 @@ def main():
     try:
         while True:
             loop_start_time = time.time()
+            now = loop_start_time # Use loop start time for consistency
 
             with state_lock:
                 cam_x = state["cam_x"]
                 cam_y = state["cam_y"]
+                cam_area = state["cam_area"]
                 last_update = state["last_cam_update"]
                 us_dist = state["us_dist"]
+                fall_stage_one_active = state["fall_stage_one_active"]
+                fall_trigger_ts = state["fall_trigger_ts"]
+                
+                # Capture speed before PID runs, for fall detection history
+                pre_pid_left = prev_left_motor
+                pre_pid_right = prev_right_motor
 
             seen_recently = (time.time() - last_update) <= DETECTION_TIMEOUT_S
             with state_lock:
@@ -307,24 +334,106 @@ def main():
             if us_dist is not None and us_dist > 0 and us_dist < MIN_SAFE_DISTANCE_M and not backup_allowed:
                 can_move = False
             
-            # --- Fall detection logic ---
-            now = time.time()
-            threshold_y = int(IMG_HEIGHT * FALL_Y_FRACTION)
-            low_now = seen_recently and (cam_y is not None) and (cam_y >= threshold_y)
+            # ----------------------------------------
+            # --- IMPROVED FALL DETECTION LOGIC ---
+            # ----------------------------------------
             
+            threshold_y = int(IMG_HEIGHT * FALL_Y_FRACTION)
+            
+            # 1. Update History Buffers (Stage 0)
             with state_lock:
-                if low_now:
-                    # If this is a NEW alert or enough time has passed
+                # Store the current position/area and manage buffer size
+                if cam_x is not None:
+                    state["cam_y_history"].append(cam_y)
+                    state["cam_area_history"].append(cam_area)
+                else:
+                    state["cam_y_history"].append(-1) # Use -1 for no detection
+                    state["cam_area_history"].append(0)
+                
+                state["cam_y_history"] = state["cam_y_history"][-HISTORY_BUFFER_SIZE:]
+                state["cam_area_history"] = state["cam_area_history"][-HISTORY_BUFFER_SIZE:]
+
+            # 2. Check for Rapid Drop (Stage 1 Trigger)
+            with state_lock:
+                # Need at least two points to calculate velocity/rate
+                if len(state["cam_y_history"]) >= 2:
+                    y_prev = state["cam_y_history"][-2]
+                    area_prev = state["cam_area_history"][-2]
+                    
+                    if cam_x is not None and y_prev != -1: # Object was seen and is now seen
+                        # Calculate vertical velocity proxy (Y increases downward)
+                        dy_dt = (cam_y - y_prev) / DT
+                        
+                        # Calculate area change (proxy for object becoming thin/horizontal)
+                        # We only care about sudden shrinkage from a non-zero area
+                        darea_dt = (cam_area - area_prev) / DT if area_prev > 0 else 0
+                        
+                        # Heuristics for sudden fall event:
+                        # 1. Object suddenly drops (Y increases rapidly) OR
+                        # 2. Object area shrinks rapidly
+                        rapid_drop = dy_dt > MAX_Y_VELOCITY_PIX_PER_DT
+                        rapid_area_loss = darea_dt < (-area_prev * MIN_AREA_SHRINK_PER_DT)
+                        
+                        if rapid_drop or rapid_area_loss:
+                            if not state["fall_stage_one_active"]:
+                                # Stage 1 Triggered: record time and speed
+                                state["fall_stage_one_active"] = True
+                                state["fall_trigger_ts"] = now
+                                state["pre_event_speed"] = max(abs(pre_pid_left), abs(pre_pid_right)) 
+                                print("DEBUG: Fall Stage 1 Triggered (Rapid Vision Change)", flush=True)
+
+                    elif cam_x is None and y_prev != -1: # Object was seen, now gone (sudden disappearance)
+                        if not state["fall_stage_one_active"]:
+                            # Stage 1 Triggered: record time and speed
+                            state["fall_stage_one_active"] = True
+                            state["fall_trigger_ts"] = now
+                            state["pre_event_speed"] = max(abs(pre_pid_left), abs(pre_pid_right)) 
+                            print("DEBUG: Fall Stage 1 Triggered (Sudden Object Loss)", flush=True)
+
+            # 3. Validation Check (Stage 2)
+            is_fall_validated = False
+            with state_lock:
+                if state["fall_stage_one_active"]:
+                    time_elapsed = now - state["fall_trigger_ts"]
+                    
+                    # Condition 1: Check persistence (Is the object still low or gone?)
+                    object_is_gone_or_low = (cam_x is None) or (cam_y is not None and cam_y >= threshold_y)
+                    
+                    # Condition 2: Check Proximity (Are we seeing the floor/far distance?)
+                    # If we have US data, check if distance is far (indicates object is on the floor away from the robot)
+                    proximity_check_passed = (us_dist is None) or (us_dist > FAR_DISTANCE_FALL_M) 
+
+                    # Condition 3: Check Time Constraint and Final State
+                    if time_elapsed >= FALL_ALERT_PERIOD_S:
+                        # Only validate if the final state (low/gone) is persistent
+                        if object_is_gone_or_low and proximity_check_passed:
+                            is_fall_validated = True
+                        else:
+                            # The event subsided (e.g., they stood back up)
+                            state["fall_stage_one_active"] = False
+
+                if is_fall_validated:
                     if (not state["fall_low_active"]) or (now - state["fall_last_alert_ts"]) >= FALL_ALERT_PERIOD_S:
-                        print("ALRT ALRT: red target low in frame", flush=True)
+                        print("ALRT VALIDATED: Multi-Modal Fall Detected!", flush=True)
                         state["fall_last_alert_ts"] = now
                     state["fall_low_active"] = True
                 else:
                     state["fall_low_active"] = False
+                    if not object_is_gone_or_low: 
+                         # If object reappears in a normal position, reset stage one flag
+                         state["fall_stage_one_active"] = False
+            
+            # --- END IMPROVED FALL DETECTION LOGIC ---
+            # -----------------------------------------
             
             # --- PID & Motor Control (Simplified for brevity, logic remains same) ---
             fwd_bwd_speed = 0
             dist_error = 0
+            
+            # Skip movement if a fall is validated (safety stop)
+            if state["fall_low_active"]:
+                can_move = False
+
             if backup_allowed and follow_mode == 'follow':
                 fwd_bwd_speed = -FORWARD_SIGN * BACKUP_SPEED_PWM
             elif can_move and (us_dist is not None):
@@ -383,6 +492,8 @@ def main():
             if not can_move:
                 left_motor = 0
                 right_motor = 0
+            
+            # Command the Arduino
             cmd = f"T{int(left_motor)},{int(right_motor)}\n"
             try:
                 arduino.write(cmd.encode('utf-8'))
@@ -396,7 +507,7 @@ def main():
 
             # Periodic status print for mode
             if int(loop_start_time * 10) % int(2 * 10) == 0:  # approx every 2s
-                print(f"[MODE] follow_mode={follow_mode}")
+                print(f"[MODE] follow_mode={follow_mode}, Fall_Active={state['fall_low_active']}", flush=True)
 
     except KeyboardInterrupt:
         print("\nShutdown requested.")
