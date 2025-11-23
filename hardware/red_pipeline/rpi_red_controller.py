@@ -14,9 +14,11 @@ import threading
 import time
 import serial
 import sys
+import os
+import glob
 
 # ---------- CONFIGURATION ----------
-OPENMV_PORT = "/dev/ttyACM0"   # Serial port for the OpenMV camera
+OPENMV_PORT = "/dev/ttyACM1"   # Serial port for the OpenMV camera
 ARDUINO_PORT = "/dev/ttyUSB0"  # Serial port for the Arduino Nano
 BAUD_RATE = 115200
 
@@ -84,6 +86,42 @@ state = {
 }
 state_lock = threading.Lock()
 
+# ---------- SERIAL PORT AUTO-DETECTION ----------
+def autodetect_openmv_port():
+    """Try to find a reasonable serial device for the OpenMV board.
+
+    Order of checks:
+    1. Environment variable OPENMV_PORT if present and exists.
+    2. /dev/serial/by-id/* (realpath) - prefer entries mentioning 'openmv'.
+    3. /dev/ttyACM* and /dev/ttyUSB* sorted by recency.
+    Returns a path string or None if nothing found.
+    """
+    # 1) env override
+    env = os.environ.get("OPENMV_PORT")
+    if env and os.path.exists(env):
+        return env
+
+    # 2) by-id (these have stable names)
+    byid = glob.glob("/dev/serial/by-id/*")
+    if byid:
+        # prefer names that explicitly mention openmv
+        for p in byid:
+            name = os.path.basename(p).lower()
+            if 'openmv' in name:
+                return os.path.realpath(p)
+        return os.path.realpath(byid[0])
+
+    # 3) fallback to common device nodes
+    candidates = glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*")
+    if not candidates:
+        return None
+    # prefer the most recently touched device (likely the last attached)
+    try:
+        candidates = sorted(candidates, key=lambda p: os.path.getmtime(p), reverse=True)
+    except Exception:
+        pass
+    return candidates[0]
+
 # ---------- SERIAL PORT READER THREAD ----------
 
 def openmv_reader_thread():
@@ -91,10 +129,20 @@ def openmv_reader_thread():
     Continuously reads from the OpenMV serial port in a background thread,
     updating the shared state with the latest blob coordinates.
     """
-    global state
+    global state, OPENMV_PORT
     print("Starting OpenMV reader thread...")
     while True:
+        # If the configured port doesn't exist, try to autodetect a candidate
         try:
+            if not os.path.exists(OPENMV_PORT):
+                candidate = autodetect_openmv_port()
+                if candidate:
+                    print(f"Auto-detected OpenMV port: {candidate}")
+                    OPENMV_PORT = candidate
+                else:
+                    print(f"OpenMV serial error: port {OPENMV_PORT} not found and no candidates; retrying in 5 seconds...")
+                    time.sleep(5)
+                    continue
             with serial.Serial(OPENMV_PORT, BAUD_RATE, timeout=1) as ser:
                 print(f"OpenMV port {OPENMV_PORT} opened successfully.")
                 while True:
