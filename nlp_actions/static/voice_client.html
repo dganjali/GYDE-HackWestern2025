@@ -308,30 +308,49 @@
                         updateVoiceStatus("Wake word detected, listening for command...", 'processing');
                         try { wakeRecognition.stop(); } catch (e) {}
                         wakeRecognition = null;
-                        startCommandCapture();
+                        setTimeout(() => {
+                            startCommandCapture();
+                        }, 400); // 400ms delay helps prevent aborted error on mobile
                     }
                 };
                 wakeRecognition.onerror = (event) => {
-                    updateVoiceStatus('Voice error: ' + event.error, 'error');
+                    // Handle aborted and permission errors with clear status
+                    if (event.error === 'aborted') {
+                        updateVoiceStatus('Voice Error: aborted. This can happen if the browser loses focus, another app uses the mic, or recognition is started without a user gesture.', 'error');
+                    } else if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+                        updateVoiceStatus('Voice Error: mic permission denied. Please allow mic access and retry.', 'error');
+                    } else {
+                        updateVoiceStatus('Voice error: ' + event.error, 'error');
+                    }
                     voiceState = "idle";
                 };
                 wakeRecognition.onend = () => {
                     // If not transitioning to command, restart wake listening
                     if (voiceState === "wake_listen") {
-                        startWakeListening();
+                        // Only restart if page is visible and focused
+                        if (document.visibilityState === 'visible') {
+                            startWakeListening();
+                        } else {
+                            updateVoiceStatus('Voice stopped: page not visible.', 'error');
+                        }
                     }
                 };
-                // Request mic permission only once
+                // Request mic permission only once, and only after a user gesture
                 if (!micInitialized) {
-                    navigator.mediaDevices.getUserMedia({ audio: true })
-                        .then(stream => {
-                            micInitialized = true;
-                            stream.getTracks().forEach(track => track.stop());
-                            wakeRecognition.start();
-                        })
-                        .catch(err => {
-                            updateVoiceStatus('Mic access denied. Please allow and refresh.', 'error');
-                        });
+                    // Only start after a user gesture (required on mobile)
+                    if (window._voiceUserGesture) {
+                        navigator.mediaDevices.getUserMedia({ audio: true })
+                            .then(stream => {
+                                micInitialized = true;
+                                stream.getTracks().forEach(track => track.stop());
+                                wakeRecognition.start();
+                            })
+                            .catch(err => {
+                                updateVoiceStatus('Mic access denied. Please allow and refresh.', 'error');
+                            });
+                    } else {
+                        updateVoiceStatus('Tap Enable Voice to start listening.', 'idle');
+                    }
                 } else {
                     wakeRecognition.start();
                 }
@@ -405,6 +424,7 @@
             // Wire up the voice toggle button
             if (voiceToggleBtn) {
                 voiceToggleBtn.addEventListener('click', () => {
+                    window._voiceUserGesture = true; // Mark that a user gesture occurred
                     if (voiceState === "idle") {
                         startWakeListening();
                         voiceToggleBtn.textContent = "Disable voice";
