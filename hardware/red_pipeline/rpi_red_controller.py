@@ -30,7 +30,7 @@ CAM_FOV_DEG = 60.0  # Approximate camera horizontal field of view
 
 # PID Controller Gains for turning (TUNING UPDATED)
 KP = 1.1   # Proportional gain - stronger for faster turning
-KI = 0.03  # Integral gain - small to avoid wind-up and oscillation
+KI = 0.003  # Integral gain - small to avoid wind-up and oscillation
 KD = 3.5   # Derivative gain - increased to help damp the stronger KP
 
 # Control Loop Parameters
