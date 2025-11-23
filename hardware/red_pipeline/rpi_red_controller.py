@@ -9,9 +9,7 @@ Core controller running on Raspberry Pi:
       - follow: robot can move (subject to vision & backup rules)
       - stay: robot stays still
 
-Fall detection & web UI removed for reliability and simplicity.
-Use the companion script `follow_mode_server.py` to change modes from a browser.
-Optionally pass `--mode follow|stay` when launching to set initial mode.
+Based on the working code but with improved responsiveness and 0.2-0.5m target range.
 """
 
 import threading
@@ -32,29 +30,27 @@ IMG_WIDTH = 320
 IMG_HEIGHT = 240  
 CAM_FOV_DEG = 60.0  
 
-# PID Controller Gains - More aggressive for faster reactions
-KP = 1.5   
-KI = 0.12  
+# PID Controller Gains (tuned for responsiveness)
+KP = 1.0   
+KI = 0.06  
 KD = 5.0   
 
 # Control Loop Parameters
-LOOP_HZ = 50.0  # Much higher for very responsive control
+LOOP_HZ = 30.0  # Faster than old code (20Hz) but stable
 DT = 1.0 / LOOP_HZ
-MAX_MOTOR_SPEED = 255  # Use full range
-TURN_SCALING = 2.5     # More aggressive turning
-ANGLE_DEADBAND_DEG = 2.0  # Smaller deadband for faster reactions
-INTEGRAL_LIMIT = 250.0   
-SLEW_RATE_LIMIT = 2000.0  # Much faster slew rate for immediate response
-ERR_SMOOTH_ALPHA = 0.65  # Less smoothing for faster response
-SMALL_ANGLE_PRIORITIZE_FWD_DEG = 12.0  
+MAX_MOTOR_SPEED = 200  
+TURN_SCALING = 1.8     # Slightly more aggressive
+ANGLE_DEADBAND_DEG = 2.5 
+INTEGRAL_LIMIT = 150.0   
+SLEW_RATE_LIMIT = 1000.0  # Smooth but responsive
+ERR_SMOOTH_ALPHA = 0.70  
+SMALL_ANGLE_PRIORITIZE_FWD_DEG = 8.0  
 
 # Distance Control - Target range: 0.2m to 0.5m
-TARGET_DIST_M = 0.35  # Middle of target range (0.2-0.5m)
-DIST_MIN_M = 0.2      # Minimum acceptable distance
-DIST_MAX_M = 0.5      # Maximum acceptable distance
-DIST_DEADBAND_M = 0.05  # Very tight deadband for responsive control
-KP_DIST = 250.0       # Much more aggressive distance control
-MIN_DRIVE_SPEED = 120  # Higher minimum to ensure movement   
+TARGET_DIST_M = 0.35  # Middle of target range
+DIST_DEADBAND_M = 0.15  # Stop between 0.20m and 0.50m (0.35 ± 0.15)
+KP_DIST = 150.0       # More aggressive than old code (was 120)
+MIN_DRIVE_SPEED = 70  # Slightly higher than old code (was 65)
 
 # Drive polarity and trims
 FORWARD_SIGN = -1
@@ -62,11 +58,7 @@ MOTOR_LEFT_TRIM = 0
 MOTOR_RIGHT_TRIM = -5    
 
 # Vision gating
-DETECTION_TIMEOUT_S = 0.3  # Shorter timeout for faster reactions      
-
-# Safety stop removed (previously caused unintended halts)
-
-# (Fall detection removed)
+DETECTION_TIMEOUT_S = 0.5      
 
 # Close-proximity backup behavior
 BACKUP_MODE_ENABLED = True
@@ -89,11 +81,9 @@ state = {
     "us_dist": None,
     "last_us_update": 0,
     "follow_mode": FOLLOW_DEFAULT_MODE,
-    "last_follow_poll": 0.0,    # timestamp of last successful poll
+    "last_follow_poll": 0.0,
 }
 state_lock = threading.Lock()
-
-# (Fall status web server removed)
 
 # ---------- SERIAL PORT READER THREADS ----------
 
@@ -130,10 +120,7 @@ def openmv_reader_thread():
             time.sleep(1)
 
 def follow_mode_poll_thread():
-    """Background thread to poll remote server for follow/stay mode.
-    Expects the endpoint to return EXACTLY 'follow' or 'stay' (case-insensitive).
-    Keeps last known mode if polling fails; logs intermittent errors.
-    """
+    """Background thread to poll remote server for follow/stay mode."""
     print(f"[MODE-POLL] Started (interval={FOLLOW_POLL_INTERVAL_S}s, url={FOLLOW_MODE_URL})")
     consecutive_failures = 0
     while True:
@@ -207,6 +194,7 @@ def main():
         with state_lock:
             state['follow_mode'] = args.mode
         print(f"[INIT] Initial mode set to '{args.mode}' via CLI.")
+    
     # 1. Start OpenMV Thread
     reader = threading.Thread(target=openmv_reader_thread, daemon=True)
     reader.start()
@@ -242,7 +230,6 @@ def main():
     try:
         while True:
             loop_start_time = time.time()
-            now = loop_start_time # Use loop start time for consistency
 
             with state_lock:
                 cam_x = state["cam_x"]
@@ -250,167 +237,111 @@ def main():
                 cam_area = state["cam_area"]
                 last_update = state["last_cam_update"]
                 us_dist = state["us_dist"]
-                # (Fall detection removed)
 
+            # Vision gating: must see a blob recently, else STOP
             seen_recently = (time.time() - last_update) <= DETECTION_TIMEOUT_S
+            can_move = (cam_x is not None) and seen_recently
+            
             with state_lock:
                 follow_mode = state['follow_mode']
             
-            # Check if we should be moving (only respect follow_mode)
-            should_move = (follow_mode == 'follow')
-            
-            # Get angle from camera if available
-            angle_center_deg = get_angle_from_x(cam_x) if (cam_x is not None) else None
-            
-            # Determine if we have a valid detection
-            has_detection = (cam_x is not None) and seen_recently
-            
-            # Calculate time since last detection (for graceful shutdown when completely lost)
-            time_since_detection = time.time() - last_update
-            detection_lost = time_since_detection > DETECTION_TIMEOUT_S
-            
-            # Only use confidence for graceful shutdown when detection is completely lost
-            # Don't scale during normal operation - be responsive!
-            # Keep moving aggressively even if detection is briefly lost
-            if detection_lost:
-                # Gradually reduce movement when detection is completely lost, but stay active longer
-                extended_timeout = DETECTION_TIMEOUT_S * 2.0  # Give it more time before stopping
-                if time_since_detection < extended_timeout:
-                    confidence = 0.7  # Still move at 70% when detection lost briefly
-                else:
-                    confidence = max(0.3, 1.0 - ((time_since_detection - extended_timeout) / DETECTION_TIMEOUT_S))
-            else:
-                confidence = 1.0
-            
+            # Only move if in follow mode
+            can_move = can_move and (follow_mode == 'follow')
+
+            # Determine backup allowance
+            angle_center_deg = get_angle_from_x(cam_x) if can_move else None
             backup_allowed = False
-            if (BACKUP_MODE_ENABLED and should_move and us_dist is not None and us_dist > 0
+            if (BACKUP_MODE_ENABLED and can_move and us_dist is not None and us_dist > 0
                 and us_dist <= BACKUP_DIST_M and angle_center_deg is not None
-                and abs(angle_center_deg) <= BACKUP_HEADING_TOL_DEG and has_detection):
+                and abs(angle_center_deg) <= BACKUP_HEADING_TOL_DEG):
                 backup_allowed = True
 
-            # --- PID & Motor Control ---
+            # --- Distance Controller (P-controller) ---
             fwd_bwd_speed = 0
             dist_error = 0
-
             if backup_allowed:
+                # Force reverse to get out of very close proximity
                 fwd_bwd_speed = -FORWARD_SIGN * BACKUP_SPEED_PWM
-            elif should_move and (us_dist is not None) and has_detection:
-                # Only move when we have a valid detection!
-                # Aggressively maintain distance in target range (0.2m - 0.5m)
-                if us_dist < DIST_MIN_M:
-                    # Too close - back up aggressively
-                    dist_error = us_dist - DIST_MIN_M
-                    fwd_bwd_speed = FORWARD_SIGN * KP_DIST * dist_error * 1.5  # Extra aggressive when too close
-                elif us_dist > DIST_MAX_M:
-                    # Too far - move forward aggressively
-                    dist_error = us_dist - DIST_MAX_M
-                    fwd_bwd_speed = FORWARD_SIGN * KP_DIST * dist_error * 1.5  # Extra aggressive when too far
-                elif abs(us_dist - TARGET_DIST_M) > DIST_DEADBAND_M:
-                    # Within range but not at target - fine-tune position
-                    dist_error = us_dist - TARGET_DIST_M
+            elif can_move and (us_dist is not None):
+                # dist_error > 0 when too far (us_dist > target)
+                dist_error = us_dist - TARGET_DIST_M
+                # Apply deadband
+                if abs(dist_error) > DIST_DEADBAND_M:
                     fwd_bwd_speed = FORWARD_SIGN * KP_DIST * dist_error
-                else:
-                    # Within deadband - minimal movement to maintain position
-                    dist_error = us_dist - TARGET_DIST_M
-                    fwd_bwd_speed = FORWARD_SIGN * KP_DIST * dist_error * 0.5  # Reduced but still active
-                
-                # Ensure minimum speed for responsiveness
-                if abs(fwd_bwd_speed) > 0 and abs(fwd_bwd_speed) < MIN_DRIVE_SPEED:
-                    fwd_bwd_speed = MIN_DRIVE_SPEED if fwd_bwd_speed > 0 else -MIN_DRIVE_SPEED
-            elif should_move and detection_lost and (us_dist is not None):
-                # If detection is lost but we recently had one, continue briefly with reduced speed
-                # This helps smooth transitions but won't move indefinitely
-                if time_since_detection < DETECTION_TIMEOUT_S * 1.5:  # Only for a short time
-                    if us_dist < DIST_MIN_M:
-                        dist_error = us_dist - DIST_MIN_M
-                        fwd_bwd_speed = FORWARD_SIGN * KP_DIST * dist_error * 0.3  # Much reduced
-                    elif us_dist > DIST_MAX_M:
-                        dist_error = us_dist - DIST_MAX_M
-                        fwd_bwd_speed = FORWARD_SIGN * KP_DIST * dist_error * 0.3  # Much reduced
-                else:
-                    fwd_bwd_speed = 0  # Stop if detection lost for too long
+                    # Ensure a minimum drive to overcome static friction
+                    if abs(fwd_bwd_speed) < MIN_DRIVE_SPEED:
+                        fwd_bwd_speed = MIN_DRIVE_SPEED if fwd_bwd_speed > 0 else -MIN_DRIVE_SPEED
             
+            # Clamp forward/backward speed
             fwd_bwd_speed = clamp(fwd_bwd_speed, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED)
 
-            # Calculate heading error - use current angle if available, otherwise maintain last filtered error
-            if angle_center_deg is not None:
-                error_raw = -angle_center_deg
-            else:
-                # When no detection, gradually decay the error towards zero
-                error_raw = error_filt * 0.88  # Faster decay for responsiveness
+            # --- PID Calculation (Turning) ---
+            error_raw = -get_angle_from_x(cam_x) if can_move else 0.0
             
-            # Less smoothing for faster response to changes
+            # Exponential smoothing to reduce oscillations
             error_filt = (ERR_SMOOTH_ALPHA * error_filt) + ((1.0 - ERR_SMOOTH_ALPHA) * error_raw)
             error = error_filt
 
-            # Apply deadband - but keep it small for faster reactions
+            # Apply deadband
             if abs(error) < ANGLE_DEADBAND_DEG:
                 error = 0
-                integral *= 0.80  # Faster integral decay when on target
+                # Decay integral when in deadband to prevent overshoot
+                integral *= 0.9
 
-            # Update integral - only when we have a detection
-            if should_move and has_detection:
-                # Only update integral when we have a valid detection
+            # Integral term with anti-windup
+            if can_move:
                 integral += error * DT
                 integral = clamp(integral, -INTEGRAL_LIMIT, INTEGRAL_LIMIT)
-            elif should_move and detection_lost and time_since_detection < DETECTION_TIMEOUT_S * 1.5:
-                # Very briefly continue updating with reduced rate
-                integral += error * DT * confidence * 0.3
-                integral = clamp(integral, -INTEGRAL_LIMIT, INTEGRAL_LIMIT)
             else:
-                # No detection or not in follow mode - reset integral
                 integral = 0.0
 
+            # Derivative term
             derivative = (error - prev_error) / DT
             prev_error = error
 
+            # PID output
             pid_output = (KP * error) + (KI * integral) + (KD * derivative)
-            turn_effort = clamp(pid_output * TURN_SCALING, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED)
-            
-            # Only turn when we have a detection (or very recently lost one)
-            if not has_detection:
-                if detection_lost and time_since_detection < DETECTION_TIMEOUT_S * 1.5:
-                    # Very briefly continue turning with last known heading, but fade out quickly
-                    turn_effort *= confidence * 0.5  # Fade out quickly
-                else:
-                    # No detection - don't turn at all
-                    turn_effort = 0
-                    error_filt = error_filt * 0.9  # Decay error faster when no detection
 
-            if should_move:
-                # Slightly reduce turn effort when angle is very small to prioritize forward movement
-                # But still apply significant turn effort for responsiveness
+            # --- Motor Command Generation ---
+            turn_effort = clamp(pid_output * TURN_SCALING, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED)
+
+            # Prioritize forward over small turns
+            if can_move:
                 ae = abs(error)
                 if ae < SMALL_ANGLE_PRIORITIZE_FWD_DEG:
-                    # Use a less aggressive attenuation - still turn but prioritize forward
-                    att = 0.3 + 0.7 * (ae / SMALL_ANGLE_PRIORITIZE_FWD_DEG)  # Minimum 30% turn effort
+                    # Linear attenuation from 0..1 over 0..threshold
+                    att = ae / SMALL_ANGLE_PRIORITIZE_FWD_DEG
                     turn_effort *= att
-                
-                # Limit turn effort based on forward speed, but be generous
-                max_turn_allowed = max(50, MAX_MOTOR_SPEED - abs(fwd_bwd_speed))  # Always allow at least 50 PWM for turning
+
+                # Forward priority under saturation
+                max_turn_allowed = max(0, MAX_MOTOR_SPEED - abs(fwd_bwd_speed))
                 turn_effort = clamp(turn_effort, -max_turn_allowed, max_turn_allowed)
-                
+
+                # While backing up, reduce turning
                 if backup_allowed:
                     turn_effort *= BACKUP_TURN_ATTEN
 
-            if should_move and (has_detection or (detection_lost and time_since_detection < DETECTION_TIMEOUT_S * 1.5)):
-                # Only move when we have a detection (or very recently lost one)
+            # Combine forward/backward and turning efforts
+            if can_move:
                 left_target = (fwd_bwd_speed + turn_effort) + MOTOR_LEFT_TRIM
                 right_target = (fwd_bwd_speed - turn_effort) + MOTOR_RIGHT_TRIM
             else:
-                # No detection or not in follow mode - stop
                 left_target = 0
                 right_target = 0
 
-            # Apply slew rate limiting for smooth transitions
+            # Apply slew rate limiting for smoother acceleration
             max_change = SLEW_RATE_LIMIT * DT
             left_motor = clamp(left_target, prev_left_motor - max_change, prev_left_motor + max_change)
             right_motor = clamp(right_target, prev_right_motor - max_change, prev_right_motor + max_change)
 
             prev_left_motor = left_motor
             prev_right_motor = right_motor
-            
-            # Command the Arduino
+
+            # --- Send Command to Arduino ---
+            # If cannot move, send a stop command explicitly
+            if not can_move:
+                left_motor = 0
+                right_motor = 0
             cmd = f"T{int(left_motor)},{int(right_motor)}\n"
             try:
                 arduino.write(cmd.encode('utf-8'))
@@ -422,12 +353,12 @@ def main():
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
-            # Periodic status print for mode
+            # Periodic status print
             if int(loop_start_time * 10) % int(2 * 10) == 0:  # approx every 2s
                 with state_lock:
                     last_poll = state['last_follow_poll']
                 age = time.time() - last_poll if last_poll > 0 else -1
-                print(f"[STATUS] mode={follow_mode} cam_seen={cam_x is not None} us={us_dist} poll_age={age:.1f}s", flush=True)
+                print(f"[STATUS] mode={follow_mode} cam_seen={cam_x is not None} us={us_dist:.2f}m poll_age={age:.1f}s", flush=True)
 
     except KeyboardInterrupt:
         print("\nShutdown requested.")
