@@ -188,6 +188,8 @@ def clamp(value, min_val, max_val):
 # ---------- MAIN CONTROL LOOP ----------
 
 def main():
+    global OPENMV_PORT, ARDUINO_PORT, BAUD_RATE
+    
     parser = argparse.ArgumentParser(description="Robot controller (follow/stay modes)")
     parser.add_argument("--mode", choices=["follow", "stay"], help="Initial mode override", default=None)
     parser.add_argument("--openmv", help="OpenMV serial port", default=OPENMV_PORT)
@@ -196,7 +198,6 @@ def main():
     args = parser.parse_args()
 
     # Allow overriding ports & initial mode
-    global OPENMV_PORT, ARDUINO_PORT, BAUD_RATE
     OPENMV_PORT = args.openmv
     ARDUINO_PORT = args.arduino
     BAUD_RATE = args.baud
