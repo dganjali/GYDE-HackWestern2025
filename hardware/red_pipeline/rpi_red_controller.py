@@ -43,8 +43,9 @@ ERR_SMOOTH_ALPHA = 0.70
 SMALL_ANGLE_PRIORITIZE_FWD_DEG = 8.0   
 
 # Distance Control
-TARGET_DIST_M = 0.6
-DIST_DEADBAND_M = 0.2   
+# Maintain distance band between 0.20 m (min) and 0.50 m (max)
+TARGET_DIST_M = 0.35     # center of 20–50 cm band
+DIST_DEADBAND_M = 0.15   # half-width => band = 0.20–0.50 m
 KP_DIST = 120.0          
 MIN_DRIVE_SPEED = 65    
 
@@ -56,8 +57,7 @@ MOTOR_RIGHT_TRIM = -5
 # Vision gating
 DETECTION_TIMEOUT_S = 0.5      
 
-# Safety stop
-MIN_SAFE_DISTANCE_M = 0.40
+# Safety stop removed (was causing undesired halts)
 
 # (Fall detection removed)
 
@@ -234,11 +234,7 @@ def main():
                 and abs(angle_center_deg) <= BACKUP_HEADING_TOL_DEG):
                 backup_allowed = True
 
-            # CHECK 1: MINIMUM SAFE DISTANCE CHECK (The most likely culprit for stopping)
-            if us_dist is not None and us_dist > 0 and us_dist < MIN_SAFE_DISTANCE_M and not backup_allowed:
-                can_move = False
-                # Added debug print to confirm safety stop is the cause
-                print(f"DEBUG: Safety Stop Triggered! us_dist={us_dist:.2f}m < {MIN_SAFE_DISTANCE_M:.2f}m", flush=True)
+            # (Minimum safe distance check removed)
 
             
             # (Fall detection logic removed)
