@@ -294,9 +294,9 @@ def main():
 
             if backup_allowed:
                 fwd_bwd_speed = -FORWARD_SIGN * BACKUP_SPEED_PWM
-            elif should_move and (us_dist is not None):
+            elif should_move and (us_dist is not None) and has_detection:
+                # Only move when we have a valid detection!
                 # Aggressively maintain distance in target range (0.2m - 0.5m)
-                # Always try to move if outside the acceptable range
                 if us_dist < DIST_MIN_M:
                     # Too close - back up aggressively
                     dist_error = us_dist - DIST_MIN_M
@@ -317,10 +317,18 @@ def main():
                 # Ensure minimum speed for responsiveness
                 if abs(fwd_bwd_speed) > 0 and abs(fwd_bwd_speed) < MIN_DRIVE_SPEED:
                     fwd_bwd_speed = MIN_DRIVE_SPEED if fwd_bwd_speed > 0 else -MIN_DRIVE_SPEED
-                
-                # Only scale by confidence if detection is completely lost (but still try to maintain distance)
-                if detection_lost:
-                    fwd_bwd_speed *= max(0.5, confidence)  # Don't stop completely, just slow down
+            elif should_move and detection_lost and (us_dist is not None):
+                # If detection is lost but we recently had one, continue briefly with reduced speed
+                # This helps smooth transitions but won't move indefinitely
+                if time_since_detection < DETECTION_TIMEOUT_S * 1.5:  # Only for a short time
+                    if us_dist < DIST_MIN_M:
+                        dist_error = us_dist - DIST_MIN_M
+                        fwd_bwd_speed = FORWARD_SIGN * KP_DIST * dist_error * 0.3  # Much reduced
+                    elif us_dist > DIST_MAX_M:
+                        dist_error = us_dist - DIST_MAX_M
+                        fwd_bwd_speed = FORWARD_SIGN * KP_DIST * dist_error * 0.3  # Much reduced
+                else:
+                    fwd_bwd_speed = 0  # Stop if detection lost for too long
             
             fwd_bwd_speed = clamp(fwd_bwd_speed, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED)
 
@@ -340,13 +348,17 @@ def main():
                 error = 0
                 integral *= 0.80  # Faster integral decay when on target
 
-            # Update integral - always when in follow mode
-            if should_move:
-                # Only reduce integral update rate when detection is completely lost
-                integral_update_rate = confidence if detection_lost else 1.0
-                integral += error * DT * integral_update_rate
+            # Update integral - only when we have a detection
+            if should_move and has_detection:
+                # Only update integral when we have a valid detection
+                integral += error * DT
+                integral = clamp(integral, -INTEGRAL_LIMIT, INTEGRAL_LIMIT)
+            elif should_move and detection_lost and time_since_detection < DETECTION_TIMEOUT_S * 1.5:
+                # Very briefly continue updating with reduced rate
+                integral += error * DT * confidence * 0.3
                 integral = clamp(integral, -INTEGRAL_LIMIT, INTEGRAL_LIMIT)
             else:
+                # No detection or not in follow mode - reset integral
                 integral = 0.0
 
             derivative = (error - prev_error) / DT
@@ -355,9 +367,15 @@ def main():
             pid_output = (KP * error) + (KI * integral) + (KD * derivative)
             turn_effort = clamp(pid_output * TURN_SCALING, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED)
             
-            # Only scale turn effort when detection is completely lost
-            if detection_lost:
-                turn_effort *= confidence
+            # Only turn when we have a detection (or very recently lost one)
+            if not has_detection:
+                if detection_lost and time_since_detection < DETECTION_TIMEOUT_S * 1.5:
+                    # Very briefly continue turning with last known heading, but fade out quickly
+                    turn_effort *= confidence * 0.5  # Fade out quickly
+                else:
+                    # No detection - don't turn at all
+                    turn_effort = 0
+                    error_filt = error_filt * 0.9  # Decay error faster when no detection
 
             if should_move:
                 # Slightly reduce turn effort when angle is very small to prioritize forward movement
@@ -375,10 +393,12 @@ def main():
                 if backup_allowed:
                     turn_effort *= BACKUP_TURN_ATTEN
 
-            if should_move:
+            if should_move and (has_detection or (detection_lost and time_since_detection < DETECTION_TIMEOUT_S * 1.5)):
+                # Only move when we have a detection (or very recently lost one)
                 left_target = (fwd_bwd_speed + turn_effort) + MOTOR_LEFT_TRIM
                 right_target = (fwd_bwd_speed - turn_effort) + MOTOR_RIGHT_TRIM
             else:
+                # No detection or not in follow mode - stop
                 left_target = 0
                 right_target = 0
 
