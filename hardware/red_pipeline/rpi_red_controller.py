@@ -16,6 +16,8 @@ import serial
 import sys
 import os
 import glob
+import urllib.request
+import urllib.error
 import argparse
 
 # ---------- CONFIGURATION ----------
@@ -47,6 +49,11 @@ FWD_SMOOTH_ALPHA = 0.45  # Smoothing for forward/back speed to reduce oscillatio
 DIST_SMOOTH_ALPHA = 0.7  # Smoothing for effective distance (0..1), higher -> smoother/slower
 ERR_SMOOTH_ALPHA = 0.80  # Reduce centroid smoothing so turning reacts faster
 USE_EFFECTIVE_DIST = True  # allow disabling area-based estimation/hold for debugging
+
+# Mode server (follow/stay) configuration
+MODE_SERVER_URL = "http://172.23.46.159:8080/"
+MODE_POLL_INTERVAL = 1.0  # seconds
+control_mode = 'follow'  # 'follow' or 'stay'
 
 # Distance Control
 # Maintain between 0.40 m (min) and 0.60 m (max) by centering target at 0.50 m with +/- 0.10 m deadband
@@ -153,6 +160,8 @@ def apply_runtime_tuning():
     parser.add_argument("--forward-sign", type=int, choices=[-1,1], help="motor forward sign (-1 or 1)")
     parser.add_argument("--disable-est", action='store_true', help="disable area-based distance estimation and hold; use raw ultrasonic only")
     parser.add_argument("--dist-alpha", type=float, help="distance smoothing alpha (0..1)")
+    parser.add_argument("--mode-url", type=str, help="URL to poll for follow/stay mode")
+    parser.add_argument("--mode-interval", type=float, help="mode polling interval seconds")
     args, _ = parser.parse_known_args()
 
     # Helper to pick arg -> env -> default
@@ -205,6 +214,14 @@ def apply_runtime_tuning():
     if v is not None:
         global DIST_SMOOTH_ALPHA
         DIST_SMOOTH_ALPHA = v
+    v = pick(args.mode_url, 'OPENMV_MODE_URL')
+    if v is not None:
+        global MODE_SERVER_URL
+        MODE_SERVER_URL = str(v)
+    v = pick(args.mode_interval, 'OPENMV_MODE_INTERVAL')
+    if v is not None:
+        global MODE_POLL_INTERVAL
+        MODE_POLL_INTERVAL = float(v)
 
 
 # ---------- SERIAL PORT READER THREAD ----------
@@ -293,6 +310,29 @@ def openmv_reader_thread():
             print(f"An unexpected error occurred in OpenMV reader: {e}")
             time.sleep(1)
 
+
+def mode_poll_thread(url, interval):
+    """Poll the mode server periodically and set `control_mode` to 'follow' or 'stay'."""
+    global control_mode
+    while True:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "rpi_red_controller/1.0"})
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                body = resp.read().decode('utf-8', errors='ignore').lower()
+                if 'stay' in body:
+                    new = 'stay'
+                elif 'follow' in body:
+                    new = 'follow'
+                else:
+                    new = control_mode
+                if new != control_mode:
+                    print(f"Mode change from server: {control_mode} -> {new}")
+                    control_mode = new
+        except Exception as e:
+            # don't spam errors; print a short message
+            print(f"Mode poll error: {e}")
+        time.sleep(interval)
+
 def arduino_reader_thread(arduino_ser):
     """
     Continuously reads from the Arduino serial port in a background thread,
@@ -355,6 +395,11 @@ def main():
     print(f"  KP={KP} KI={KI} KD={KD} | KP_DIST={KP_DIST} MIN_DRIVE={MIN_DRIVE_SPEED}")
     print(f"  TURN_SCALE={TURN_SCALING} ERR_ALPHA={ERR_SMOOTH_ALPHA} FWD_ALPHA={FWD_SMOOTH_ALPHA} SLEW={SLEW_RATE_LIMIT}")
 
+    # Start the mode poller thread (follow/stay)
+    mode_thread = threading.Thread(target=mode_poll_thread, args=(MODE_SERVER_URL, MODE_POLL_INTERVAL), daemon=True)
+    mode_thread.start()
+    print(f"Mode poller started, polling {MODE_SERVER_URL} every {MODE_POLL_INTERVAL}s")
+
     # Start the OpenMV reader thread
     reader = threading.Thread(target=openmv_reader_thread, daemon=True)
     reader.start()
@@ -379,6 +424,9 @@ def main():
     # Start the Arduino reader thread (once)
     arduino_reader = threading.Thread(target=arduino_reader_thread, args=(arduino,), daemon=True)
     arduino_reader.start()
+
+    # Track mode changes so we can send an immediate stop when switching to 'stay'
+    prev_control_mode = control_mode
 
     # PID state variables
     integral = 0.0
@@ -473,6 +521,24 @@ def main():
             # Vision gating: must see a blob recently, else STOP
             seen_recently = (time.time() - last_update) <= DETECTION_TIMEOUT_S
             can_move = (cam_x is not None) and seen_recently
+
+            # If server mode is 'stay', override and don't allow movement
+            if control_mode != 'follow':
+                if control_mode != prev_control_mode:
+                    print(f"Control mode changed to '{control_mode}' - overriding movement")
+                    # If switching to stay, send an immediate stop command
+                    if control_mode == 'stay':
+                        try:
+                            arduino.write(b"T0,0\n")
+                        except Exception:
+                            pass
+                    prev_control_mode = control_mode
+                can_move = False
+            else:
+                # if we've just switched back to follow, update prev_control_mode
+                if control_mode != prev_control_mode:
+                    print(f"Control mode changed to '{control_mode}' - resuming movement")
+                    prev_control_mode = control_mode
 
             # Determine backup allowance before safety stop
             angle_center_deg = get_angle_from_x(cam_x) if can_move else None
