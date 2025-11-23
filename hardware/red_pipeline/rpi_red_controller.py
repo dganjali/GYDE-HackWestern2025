@@ -31,15 +31,15 @@ IMG_HEIGHT = 240  # QVGA height
 CAM_FOV_DEG = 60.0  # Approximate camera horizontal field of view
 
 # PID Controller Gains for turning (TUNING UPDATED)
-KP = 1.6   # Proportional gain - slightly stronger for faster turning
+KP = 1.1   # Proportional gain - softened to avoid overly aggressive turns
 KI = 0.003  # Integral gain - very small to avoid slow integral wind-up
-KD = 4.5   # Derivative gain - increased to help damp the stronger KP
+KD = 4.5   # Derivative gain - provides damping against oscillation
 
 # Control Loop Parameters
 LOOP_HZ = 20.0  # Target frequency for the control loop (20 Hz = 50ms per loop)
 DT = 1.0 / LOOP_HZ
 MAX_MOTOR_SPEED = 220  # Max PWM value for motors (0-255)
-TURN_SCALING = 2.6     # Increased scaling to amplify turn output
+TURN_SCALING = 1.8     # Reduced scaling to make turning less aggressive
 ANGLE_DEADBAND_DEG = 2.5 # Ignore small angle errors to prevent jitter
 INTEGRAL_LIMIT = 150.0   # Prevents integral wind-up
 SLEW_RATE_LIMIT = 3000.0  # Max change in motor speed per second to smooth motion (higher -> quicker accel)
@@ -48,6 +48,11 @@ SMALL_ANGLE_PRIORITIZE_FWD_DEG = 4.0  # Below this, attenuate turning to prefer 
 FWD_SMOOTH_ALPHA = 0.25  # Smoothing for forward/back speed to reduce oscillation (lower = snappier)
 DIST_SMOOTH_ALPHA = 0.7  # Smoothing for effective distance (0..1), higher -> smoother/slower
 USE_EFFECTIVE_DIST = True  # allow disabling area-based estimation/hold for debugging
+# Safety tuning: if the robot is turning very aggressively, attenuate forward drive
+# TURN_AGGRESSIVE_THRESH: fraction of MAX_MOTOR_SPEED above which we consider the turn aggressive
+TURN_AGGRESSIVE_THRESH = 0.5
+# Fraction of forward speed to keep when an aggressive turn is happening (0..1)
+TURN_AGGRESSIVE_FWD_ATTEN = 0.35
 
 # Mode server (follow/stay) configuration
 MODE_SERVER_URL = "http://172.23.46.159:8080/mode"
@@ -667,6 +672,16 @@ def main():
                 # While backing up, reduce turning even more
                 if backup_allowed:
                     turn_effort *= BACKUP_TURN_ATTEN
+
+                # Safety: if turning effort is very large, reduce forward drive so we don't
+                # drive forward aggressively while violently turning (prevents running into target)
+                try:
+                    aggressive_threshold = TURN_AGGRESSIVE_THRESH * MAX_MOTOR_SPEED
+                    if abs(turn_effort) >= aggressive_threshold and abs(fwd_bwd_speed) > 0:
+                        fwd_bwd_speed = fwd_bwd_speed * TURN_AGGRESSIVE_FWD_ATTEN
+                except Exception:
+                    # defensive: if constants missing for some reason, skip attenuation
+                    pass
 
             # Combine forward/backward and turning efforts (apply trims only when moving)
             # Positive turn_effort should turn RIGHT (target on the right -> positive error)
