@@ -23,6 +23,12 @@ import argparse
 import urllib.request
 import json
 
+# Ensure project root is on sys.path so `hardware.red_pipeline` imports work
+from pathlib import Path
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 from hardware.red_pipeline.pure_pursuit import PurePursuit, mix_to_wheels
 
 # --------- CONFIG (tunable) ----------
