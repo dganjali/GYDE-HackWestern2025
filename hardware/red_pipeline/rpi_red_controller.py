@@ -45,6 +45,7 @@ ERR_SMOOTH_ALPHA = 0.90  # More smoothing for the centroid/derivative
 SMALL_ANGLE_PRIORITIZE_FWD_DEG = 8.0  # Below this, attenuate turning to prefer forward motion
 FWD_SMOOTH_ALPHA = 0.45  # Smoothing for forward/back speed to reduce oscillation
 DIST_SMOOTH_ALPHA = 0.7  # Smoothing for effective distance (0..1), higher -> smoother/slower
+USE_EFFECTIVE_DIST = True  # allow disabling area-based estimation/hold for debugging
 
 # Distance Control
 # Maintain between 0.40 m (min) and 0.80 m (max) by centering target at 0.60 m with +/- 0.20 m deadband
@@ -148,6 +149,9 @@ def apply_runtime_tuning():
     parser.add_argument("--err-alpha", type=float, help="error smoothing alpha (0..1)")
     parser.add_argument("--turn-scale", type=float, help="turn scaling multiplier")
     parser.add_argument("--fwd-alpha", type=float, help="forward smoothing alpha (0..1)")
+    parser.add_argument("--forward-sign", type=int, choices=[-1,1], help="motor forward sign (-1 or 1)")
+    parser.add_argument("--disable-est", action='store_true', help="disable area-based distance estimation and hold; use raw ultrasonic only")
+    parser.add_argument("--dist-alpha", type=float, help="distance smoothing alpha (0..1)")
     args, _ = parser.parse_known_args()
 
     # Helper to pick arg -> env -> default
@@ -189,6 +193,17 @@ def apply_runtime_tuning():
     v = pick(args.fwd_alpha, 'OPENMV_FWD_ALPHA')
     if v is not None:
         FWD_SMOOTH_ALPHA = v
+    v = pick(args.forward_sign, 'OPENMV_FORWARD_SIGN')
+    if v is not None:
+        global FORWARD_SIGN
+        FORWARD_SIGN = int(v)
+    if args.disable_est:
+        global USE_EFFECTIVE_DIST
+        USE_EFFECTIVE_DIST = False
+    v = pick(args.dist_alpha, 'OPENMV_DIST_ALPHA')
+    if v is not None:
+        global DIST_SMOOTH_ALPHA
+        DIST_SMOOTH_ALPHA = v
 
 
 # ---------- SERIAL PORT READER THREAD ----------
@@ -395,51 +410,55 @@ def main():
             us_age = now - state.get("last_us_update", 0)
             has_recent_us = (state.get("last_us_update", 0) > 0) and (us_age <= 2.0)
 
-            # If both camera and ultrasonic are available, record calibration sample
-            cam_area = state.get("cam_area", 0)
-            if cam_area and cam_area >= MIN_AREA_FOR_EST and us_dist is not None and us_dist > 0:
-                # compute k = area * dist^2 for inverse-square relation
-                try:
-                    k = float(cam_area) * (float(us_dist) ** 2)
-                    AREA_DIST_K.append(k)
-                    # trim buffer
-                    if len(AREA_DIST_K) > AREA_DIST_SAMPLES_MAX:
-                        AREA_DIST_K.pop(0)
-                except Exception:
-                    pass
-
-            # 1) If ultrasonic recent, use it
-            if us_dist is not None and has_recent_us:
-                effective_us_dist = us_dist
-                dist_source = 'US'
+            # Quick bypass: use raw ultrasonic only (useful for debugging if estimation broke behavior)
+            if not USE_EFFECTIVE_DIST:
+                if us_dist is not None and has_recent_us:
+                    effective_us_dist = us_dist
+                    dist_source = 'US'
+                else:
+                    effective_us_dist = None
+                    dist_source = 'N/A'
             else:
-                # 2) If camera sees blob and we have calibration, estimate from area
-                if cam_area and cam_area >= MIN_AREA_FOR_EST and AREA_DIST_K:
-                    # use median k for robustness
+                # If both camera and ultrasonic are available, record calibration sample
+                cam_area = state.get("cam_area", 0)
+                if cam_area and cam_area >= MIN_AREA_FOR_EST and us_dist is not None and us_dist > 0:
+                    # compute k = area * dist^2 for inverse-square relation
                     try:
-                        sorted_k = sorted(AREA_DIST_K)
-                        mid = len(sorted_k) // 2
-                        if len(sorted_k) % 2 == 1:
-                            k_med = sorted_k[mid]
-                        else:
-                            k_med = 0.5 * (sorted_k[mid - 1] + sorted_k[mid])
-                        est = (k_med / float(cam_area)) ** 0.5
-                        # sanity clamp
-                        if 0.02 < est < 5.0:
-                            effective_us_dist = est
-                            dist_source = 'EST'
+                        k = float(cam_area) * (float(us_dist) ** 2)
+                        AREA_DIST_K.append(k)
+                        # trim buffer
+                        if len(AREA_DIST_K) > AREA_DIST_SAMPLES_MAX:
+                            AREA_DIST_K.pop(0)
                     except Exception:
-                        effective_us_dist = None
-                # 3) Otherwise, if camera lost sight but we have very recent ultrasonic, hold it
-                if effective_us_dist is None and state.get("last_us_update", 0) > 0:
-                    if (now - state.get("last_us_update", 0)) <= HOLD_US_WHEN_NO_CAM_S:
-                        effective_us_dist = state.get("us_dist")
-                        dist_source = 'HOLD'
+                        pass
 
-            # Fallback: zero or None
-            if effective_us_dist is None:
-                effective_us_dist = None
-                dist_source = 'N/A'
+                # 1) If ultrasonic recent, use it
+                if us_dist is not None and has_recent_us:
+                    effective_us_dist = us_dist
+                    dist_source = 'US'
+                else:
+                    # 2) If camera sees blob and we have calibration, estimate from area
+                    if cam_area and cam_area >= MIN_AREA_FOR_EST and AREA_DIST_K:
+                        # use median k for robustness
+                        try:
+                            sorted_k = sorted(AREA_DIST_K)
+                            mid = len(sorted_k) // 2
+                            if len(sorted_k) % 2 == 1:
+                                k_med = sorted_k[mid]
+                            else:
+                                k_med = 0.5 * (sorted_k[mid - 1] + sorted_k[mid])
+                            est = (k_med / float(cam_area)) ** 0.5
+                            # sanity clamp
+                            if 0.02 < est < 5.0:
+                                effective_us_dist = est
+                                dist_source = 'EST'
+                        except Exception:
+                            effective_us_dist = None
+                    # 3) Otherwise, if camera lost sight but we have very recent ultrasonic, hold it
+                    if effective_us_dist is None and state.get("last_us_update", 0) > 0:
+                        if (now - state.get("last_us_update", 0)) <= HOLD_US_WHEN_NO_CAM_S:
+                            effective_us_dist = state.get("us_dist")
+                            dist_source = 'HOLD'
 
             # Apply exponential smoothing to the effective distance to reduce choppy changes
             if effective_us_dist is not None:
