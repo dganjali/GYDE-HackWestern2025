@@ -86,7 +86,7 @@ BACKUP_TURN_ATTEN = 0.3
 
 # External follow control
 # Note: Replace <laptop_ip> with the actual IP address of the machine running follow_mode_server.py
-FOLLOW_MODE_URL = "http://<laptop_ip>:8080/mode"  
+FOLLOW_MODE_URL = "http://172.23.46.159:8080/mode"  
 FOLLOW_POLL_INTERVAL_S = 2.0
 FOLLOW_DEFAULT_MODE = "follow"  
 
@@ -395,11 +395,12 @@ def main():
             is_fall_validated = False
             with state_lock:
                 prev_fall_active = state["fall_low_active"]
+                
+                # This must be calculated on every loop, regardless of fall state
+                object_is_gone_or_low = (cam_x is None) or (cam_y is not None and cam_y >= threshold_y)
+
                 if state["fall_stage_one_active"]:
                     time_elapsed = now - state["fall_trigger_ts"]
-                    
-                    # Condition 1: Check persistence (Is the object still low or gone?)
-                    object_is_gone_or_low = (cam_x is None) or (cam_y is not None and cam_y >= threshold_y)
                     
                     # Condition 2: Check Proximity (Are we seeing the floor/far distance?)
                     # If we have US data, check if distance is far (indicates object is on the floor away from the robot)
