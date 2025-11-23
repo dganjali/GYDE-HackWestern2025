@@ -205,10 +205,35 @@ def openmv_reader_thread():
                     print(f"OpenMV serial error: port {OPENMV_PORT} not found and no candidates; retrying in 5 seconds...")
                     time.sleep(5)
                     continue
-            with serial.Serial(OPENMV_PORT, BAUD_RATE, timeout=1) as ser:
-                print(f"OpenMV port {OPENMV_PORT} opened successfully.")
+
+            # Open explicitly so we can control recovery actions (DTR toggle, close)
+            ser = serial.Serial(OPENMV_PORT, BAUD_RATE, timeout=1)
+            print(f"OpenMV port {OPENMV_PORT} opened successfully.")
+            try:
                 while True:
-                    line = ser.readline().decode('utf-8', errors='ignore').strip()
+                    try:
+                        line = ser.readline().decode('utf-8', errors='ignore').strip()
+                    except serial.SerialException as e_read:
+                        # Serial read error may indicate the device is in a bad state or
+                        # another process is interfering. Attempt a DTR toggle reset and retry.
+                        print(f"OpenMV serial read error: {e_read}. Attempting DTR toggle and reopen...")
+                        try:
+                            # Try toggling DTR to reset the OpenMV board (may help recover USB VCP)
+                            try:
+                                ser.setDTR(False)
+                                time.sleep(0.05)
+                                ser.setDTR(True)
+                            except Exception:
+                                pass
+                        finally:
+                            try:
+                                ser.close()
+                            except Exception:
+                                pass
+                        # short backoff then let outer loop attempt to re-open
+                        time.sleep(2)
+                        break
+
                     if not line:
                         continue
 
@@ -232,6 +257,12 @@ def openmv_reader_thread():
                             state["cam_x"] = None
                             state["cam_y"] = None
                             state["cam_area"] = 0
+            finally:
+                try:
+                    ser.close()
+                except Exception:
+                    pass
+
         except serial.SerialException as e:
             print(f"OpenMV serial error: {e}. Retrying in 5 seconds...")
             time.sleep(5)
